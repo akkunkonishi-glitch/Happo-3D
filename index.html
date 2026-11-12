@@ -20,8 +20,8 @@ async function buildGsiDem(z,x,y){
     const ctx=canvas().getContext('2d',{willReadFrequently:true});ctx.drawImage(bmp,0,0);if(bmp.close)bmp.close();return ctx.getImageData(0,0,256,256)}
   const isNA=(d,i)=>d[i+3]===0||(d[i]===128&&d[i+1]===0&&d[i+2]===0);
   let img,fb=null;
-  if(z>=15){img=await load('dem5a_png',15,x,y);let needFb=!img;if(img){const d=img.data;for(let i=0;i<d.length;i+=4)if(isNA(d,i)){needFb=true;break}}if(needFb)fb=await load('dem10b_png',14,x>>1,y>>1)}
-  else{img=await load('dem10b_png',z,x,y)}
+  if(z>=15){img=await load('dem5a_png',15,x,y);let needFb=!img;if(img){const d=img.data;for(let i=0;i<d.length;i+=4)if(isNA(d,i)){needFb=true;break}}if(needFb)fb=await load('dem_png',14,x>>1,y>>1)}
+  else{img=await load('dem_png',z,x,y)}
   if(!img&&!fb)throw new Error('missing');
   if(!img)img=new ImageData(256,256);
   const d=img.data,ox=(x&1)*128,oy=(y&1)*128;
