@@ -4,7 +4,45 @@ const center=[(Math.min(...boundary.map(p=>p[0]))+Math.max(...boundary.map(p=>p[
 const status=document.getElementById('status');let drawing=false,rope=[];
 if(!window.maplibregl){status.textContent='ライブラリを読み込めません。HTTPSで公開して開いてください。';}
 else{
-const map=new maplibregl.Map({container:'map',center,zoom:11.5,maxPitch:85,pitch:65,bearing:-15,style:{version:8,sources:{photo:{type:'raster',tiles:['https://cyberjapandata.gsi.go.jp/xyz/seamlessphoto/{z}/{x}/{y}.jpg'],tileSize:256,minzoom:2,maxzoom:18,attribution:'国土地理院（シームレス空中写真・数値標高モデル）'},dem:{type:'raster-dem',tiles:['https://s3.amazonaws.com/elevation-tiles-prod/terrarium/{z}/{x}/{y}.png'],tileSize:256,encoding:'terrarium',maxzoom:14}},layers:[{id:'photo',type:'raster',source:'photo'}],terrain:{source:'dem',exaggeration:1}}});
+// 表示範囲：KML範囲の少し外側(約2km)で移動を制限。タイルはもう少し外側(約4km)まで読む。
+const kmlB=[Math.min(...boundary.map(p=>p[0])),Math.min(...boundary.map(p=>p[1])),Math.max(...boundary.map(p=>p[0])),Math.max(...boundary.map(p=>p[1]))];
+const viewBounds=[[kmlB[0]-0.02,kmlB[1]-0.02],[kmlB[2]+0.02,kmlB[3]+0.02]];
+const tileBounds=[kmlB[0]-0.04,kmlB[1]-0.04,kmlB[2]+0.04,kmlB[3]+0.04];
+maplibregl.setMaxParallelImageRequests(8);
+// 国土地理院 標高PNGタイル：h=(R*65536+G*256+B)/100、(128,0,0)は無効値。
+// ズーム14以下=DEM10B、ズーム15=DEM5A（無効値・欠けはDEM10Bで補完）。
+// 画素処理は別スレッド(Worker)で行い、PNG再変換はせず画像をそのまま渡す。
+async function buildGsiDem(z,x,y){
+  const GSI='https://cyberjapandata.gsi.go.jp/xyz/';
+  const canvas=()=>{if(typeof OffscreenCanvas!=='undefined')return new OffscreenCanvas(256,256);const c=document.createElement('canvas');c.width=c.height=256;return c};
+  async function load(layer,lz,lx,ly){const r=await fetch(GSI+layer+'/'+lz+'/'+lx+'/'+ly+'.png');if(!r.ok)return null;
+    const bmp=await createImageBitmap(await r.blob(),{colorSpaceConversion:'none',premultiplyAlpha:'none'});
+    const ctx=canvas().getContext('2d',{willReadFrequently:true});ctx.drawImage(bmp,0,0);if(bmp.close)bmp.close();return ctx.getImageData(0,0,256,256)}
+  const isNA=(d,i)=>d[i+3]===0||(d[i]===128&&d[i+1]===0&&d[i+2]===0);
+  let img,fb=null;
+  if(z>=15){img=await load('dem5a_png',15,x,y);let needFb=!img;if(img){const d=img.data;for(let i=0;i<d.length;i+=4)if(isNA(d,i)){needFb=true;break}}if(needFb)fb=await load('dem10b_png',14,x>>1,y>>1)}
+  else{img=await load('dem10b_png',z,x,y)}
+  if(!img&&!fb)throw new Error('missing');
+  if(!img)img=new ImageData(256,256);
+  const d=img.data,ox=(x&1)*128,oy=(y&1)*128;
+  for(let row=0;row<256;row++)for(let col=0;col<256;col++){const i=(row*256+col)*4;
+    if(isNA(d,i)){let ok=false;if(fb){const j=((oy+(row>>1))*256+ox+(col>>1))*4,f=fb.data;if(!isNA(f,j)&&f[j]<128){d[i]=f[j];d[i+1]=f[j+1];d[i+2]=f[j+2];ok=true}}if(!ok){d[i]=d[i+1]=d[i+2]=0}}
+    else if(d[i]>=128){d[i]=d[i+1]=d[i+2]=0}
+    d[i+3]=255}
+  return createImageBitmap(img)}
+let demWorker=null,demSeq=0;const demPending=new Map();
+try{if(typeof OffscreenCanvas!=='undefined'){
+  const src=buildGsiDem.toString()+";self.onmessage=async e=>{const {id,z,x,y}=e.data;try{const b=await buildGsiDem(z,x,y);self.postMessage({id,bitmap:b},[b])}catch(err){self.postMessage({id,missing:err.message==='missing',err:String(err)})}};";
+  demWorker=new Worker(URL.createObjectURL(new Blob([src],{type:'text/javascript'})));
+  demWorker.onmessage=e=>{const p=demPending.get(e.data.id);if(!p)return;demPending.delete(e.data.id);e.data.bitmap?p.res(e.data.bitmap):p.rej(e.data)};
+  demWorker.onerror=()=>{demWorker=null;for(const p of demPending.values())p.rej({});demPending.clear()}}}catch(e){demWorker=null}
+maplibregl.addProtocol('gsidem',async(params)=>{
+  const [z,x,y]=params.url.replace('gsidem://','').split('/').map(Number);let bmp;
+  if(demWorker){try{bmp=await new Promise((res,rej)=>{const id=++demSeq;demPending.set(id,{res,rej});demWorker.postMessage({id,z,x,y})})}
+    catch(e){if(e&&e.missing)throw new Error('標高タイルなし '+z+'/'+x+'/'+y);bmp=await buildGsiDem(z,x,y)}}
+  else bmp=await buildGsiDem(z,x,y);
+  return {data:bmp}});
+const map=new maplibregl.Map({container:'map',center,zoom:12,minZoom:12,maxBounds:viewBounds,maxPitch:85,pitch:65,bearing:-15,style:{version:8,sources:{photo:{type:'raster',tiles:['https://cyberjapandata.gsi.go.jp/xyz/seamlessphoto/{z}/{x}/{y}.jpg'],tileSize:256,minzoom:2,maxzoom:18,bounds:tileBounds,attribution:'国土地理院（シームレス空中写真・数値標高モデル）'},dem:{type:'raster-dem',tiles:['gsidem://{z}/{x}/{y}'],tileSize:256,encoding:'custom',redFactor:655.36,greenFactor:2.56,blueFactor:0.01,baseShift:0,minzoom:1,maxzoom:15,bounds:tileBounds}},layers:[{id:'photo',type:'raster',source:'photo'}],terrain:{source:'dem',exaggeration:1}}});
 map.addControl(new maplibregl.NavigationControl(),'bottom-right');
 function feature(points,kind){return {type:'Feature',geometry:{type:kind,coordinates:points},properties:{}}}
 const boundaryGeo={type:'FeatureCollection',features:[feature([...boundary,boundary[0]],'LineString')]};
