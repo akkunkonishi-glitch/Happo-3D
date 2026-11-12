@@ -4,7 +4,7 @@ const center=[(Math.min(...boundary.map(p=>p[0]))+Math.max(...boundary.map(p=>p[
 const status=document.getElementById('status');let drawing=false,rope=[];
 if(!window.maplibregl){status.textContent='ライブラリを読み込めません。HTTPSで公開して開いてください。';}
 else{
-const map=new maplibregl.Map({container:'map',center,zoom:11.5,maxPitch:85,pitch:65,bearing:-15,style:{version:8,sources:{photo:{type:'raster',tiles:['https://cyberjapandata.gsi.go.jp/xyz/seamlessphoto/{z}/{x}/{y}.jpg'],tileSize:256,minzoom:2,maxzoom:18,attribution:'国土地理院（シームレス空中写真・数値標高モデル）'},dem:{type:'raster-dem',tiles:['https://cyberjapandata.gsi.go.jp/xyz/dem10b_png/{z}/{x}/{y}.png'],tileSize:256,encoding:'custom',redFactor:655.36,greenFactor:2.56,blueFactor:0.01,baseShift:0,minzoom:1,maxzoom:14}},layers:[{id:'photo',type:'raster',source:'photo'}],terrain:{source:'dem',exaggeration:1}}});
+const map=new maplibregl.Map({container:'map',center,zoom:11.5,maxPitch:85,pitch:65,bearing:-15,style:{version:8,sources:{photo:{type:'raster',tiles:['https://cyberjapandata.gsi.go.jp/xyz/seamlessphoto/{z}/{x}/{y}.jpg'],tileSize:256,minzoom:2,maxzoom:18,attribution:'国土地理院（シームレス空中写真・数値標高モデル）'},dem:{type:'raster-dem',tiles:['https://s3.amazonaws.com/elevation-tiles-prod/terrarium/{z}/{x}/{y}.png'],tileSize:256,encoding:'terrarium',maxzoom:14}},layers:[{id:'photo',type:'raster',source:'photo'}],terrain:{source:'dem',exaggeration:1}}});
 map.addControl(new maplibregl.NavigationControl(),'bottom-right');
 function feature(points,kind){return {type:'Feature',geometry:{type:kind,coordinates:points},properties:{}}}
 const boundaryGeo={type:'FeatureCollection',features:[feature([...boundary,boundary[0]],'LineString')]};
