@@ -111,5 +111,45 @@
     return { type: 'FeatureCollection', properties: { source: 'OpenStreetMap (Overpass API)', license: 'ODbL © OpenStreetMap contributors', note: 'ピステ中心線は幅' + width + 'mでバッファしてポリゴン化', generated: new Date().toISOString() }, features: feats };
   }
 
-  root.HappoCourses = { bufferLine, osmToCourses, simplify, joinRings };
+  // リングを整える：数値チェック・連続重複の除去・閉じる・向き（外周=反時計回り、穴=時計回り：GeoJSONの決まり）
+  function cleanRing(r, hole) {
+    let c = (r || []).filter(q => Array.isArray(q) && isFinite(q[0]) && isFinite(q[1])).map(q => [+(+q[0]).toFixed(7), +(+q[1]).toFixed(7)]);
+    c = c.filter((q, i) => i === 0 || q[0] !== c[i - 1][0] || q[1] !== c[i - 1][1]);
+    if (c.length && (c[0][0] !== c[c.length - 1][0] || c[0][1] !== c[c.length - 1][1])) c.push(c[0].slice());
+    if (c.length < 4) return null;
+    let a = 0; for (let i = 1; i < c.length; i++) a += c[i - 1][0] * c[i][1] - c[i][0] * c[i - 1][1];
+    if (Math.abs(a) < 1e-14) return null;            // 面積ゼロ（一直線）
+    if ((a < 0) !== !!hole) c.reverse();             // 外周は反時計回り(a>0)、穴は時計回り
+    return c;
+  }
+  // どの形式のデータでも courses.geojson の形（コース=Polygon、リフト=LineString）に整える。
+  // 旧形式（kind=piste-area / piste-line）も変換し、中心線は幅widthでポリゴン化する。
+  function normalizeCourses(geo, opts) {
+    opts = opts || {};
+    const width = opts.width || 30, out = [], seen = new Set();
+    let n = 0;
+    const uid = base => { let id = base || ('c' + (++n)); while (seen.has(id)) id = (base || 'c') + '#' + (++n); seen.add(id); return id; };
+    const addCourse = (props, rings, src) => {
+      const outer = cleanRing(rings[0], false); if (!outer) return;
+      const holes = rings.slice(1).map(h => cleanRing(h, true)).filter(Boolean);
+      const p = Object.assign({}, props, { kind: 'course' }); if (src && !p.source) p.source = src; p.id = uid(p.id || p.osm);
+      delete p.osm; delete p.width;
+      out.push({ type: 'Feature', properties: p, geometry: { type: 'Polygon', coordinates: [outer, ...holes] } });
+    };
+    for (const f of (geo && geo.features) || []) {
+      if (!f || !f.geometry || !f.properties) continue;
+      const k = f.properties.kind, g = f.geometry;
+      if (k === 'lift' && g.type === 'LineString' && g.coordinates.length >= 2) {
+        const p = Object.assign({}, f.properties); p.id = uid(p.id || p.osm); delete p.osm;
+        out.push({ type: 'Feature', properties: p, geometry: { type: 'LineString', coordinates: g.coordinates.map(q => [+(+q[0]).toFixed(7), +(+q[1]).toFixed(7)]) } });
+      } else if (g.type === 'Polygon') addCourse(f.properties, g.coordinates);
+      else if (g.type === 'MultiPolygon') g.coordinates.forEach((pg, i) => addCourse(Object.assign({}, f.properties, { id: (f.properties.id || f.properties.osm || 'c') + (g.coordinates.length > 1 ? '#' + i : '') }), pg));
+      else if ((k === 'piste-line' || k === 'course') && g.type === 'LineString' && g.coordinates.length >= 2) {
+        const w = width, ring = bufferLine(g.coordinates, w); if (ring) addCourse(f.properties, [ring], 'osm-centerline-buffer' + w + 'm');
+      }
+    }
+    return { type: 'FeatureCollection', properties: Object.assign({}, (geo && geo.properties) || {}), features: out };
+  }
+
+  root.HappoCourses = { bufferLine, osmToCourses: (osm, o) => normalizeCourses(osmToCourses(osm, o), o), normalizeCourses, cleanRing, simplify, joinRings };
 })(typeof window !== 'undefined' ? window : globalThis);
