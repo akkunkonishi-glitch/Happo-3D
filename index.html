@@ -1,4 +1,4 @@
-<!doctype html><html lang="ja"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1"><title>八方尾根3D管理 試作</title><link href="https://unpkg.com/maplibre-gl@4.7.1/dist/maplibre-gl.css" rel="stylesheet"><style>html,body,#map{margin:0;width:100%;height:100%;font-family:system-ui}#panel{position:absolute;top:12px;left:12px;background:#ffffffee;padding:12px;border-radius:12px;max-width:260px;box-shadow:0 2px 12px #0003}button,select{padding:8px;margin:3px;border-radius:7px;border:1px solid #aaa;background:white}#status{font-size:12px;color:#444}#total{font-weight:bold}#map{background:#c5d7e4}</style></head><body><div id="map"></div><div id="panel"><b>八方尾根 3D 管理マップ</b><div id="status">地図ライブラリを読み込み中…</div><div><button id="tilt">3D表示</button><button id="flat">真上から</button><button id="contour">等高線 ON</button></div><div><button id="draw">ロープを描く</button><button id="undo">1点戻す</button><button id="clear">消去</button></div><div id="total">ロープ距離: 0 m</div><small>赤線：指定KML範囲。地図上をタップしてロープの点を追加。距離は水平概算。</small></div><script src="https://unpkg.com/maplibre-gl@4.7.1/dist/maplibre-gl.js"></script><script src="https://unpkg.com/maplibre-contour@0.1.0/dist/index.min.js"></script><script>
+<!doctype html><html lang="ja"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1"><title>八方尾根3D管理 試作</title><link href="https://unpkg.com/maplibre-gl@4.7.1/dist/maplibre-gl.css" rel="stylesheet"><style>html,body,#map{margin:0;width:100%;height:100%;font-family:system-ui}#panel{position:absolute;top:12px;left:12px;background:#ffffffee;padding:12px;border-radius:12px;max-width:260px;box-shadow:0 2px 12px #0003}button,select{padding:8px;margin:3px;border-radius:7px;border:1px solid #aaa;background:white}#status{font-size:12px;color:#444}#total{font-weight:bold}#map{background:#c5d7e4}</style></head><body><div id="map"></div><div id="panel"><b>八方尾根 3D 管理マップ</b><div id="status">地図ライブラリを読み込み中…</div><div><button id="tilt">3D表示</button><button id="flat">真上から</button><button id="contour">等高線 ON</button></div><div><button id="draw">ロープを描く</button><button id="undo">1点戻す</button><button id="clear">消去</button></div><div><label><input type="checkbox" id="followOn" checked>地表追従</label> 高さ <input id="followH" type="number" value="20" min="2" max="300" step="1" style="width:4em">m <span id="followState" style="font-size:12px;color:#666"></span></div><div id="total">ロープ距離: 0 m</div><small>赤線：指定KML範囲。地図上をタップしてロープの点を追加。距離は水平概算。</small></div><script src="https://unpkg.com/maplibre-gl@4.7.1/dist/maplibre-gl.js"></script><script src="https://unpkg.com/maplibre-contour@0.1.0/dist/index.min.js"></script><script>
 const boundary=[[137.79031276702884, 36.71360253057494], [137.79031276702884, 36.71360253057494], [137.78507709503177, 36.709955790915565], [137.78507709503177, 36.709955790915565], [137.78447628021243, 36.705345513841785], [137.78447628021243, 36.705345513841785], [137.7805280685425, 36.68999886813347], [137.7805280685425, 36.68999886813347], [137.7827596664429, 36.685456224030055], [137.7827596664429, 36.685456224030055], [137.80009746551517, 36.673065830877334], [137.80009746551517, 36.673065830877334], [137.8038311004639, 36.67110383562481], [137.8038311004639, 36.67110383562481], [137.808895111084, 36.67351329647276], [137.808895111084, 36.67351329647276], [137.81473159790042, 36.68012171607383], [137.81473159790042, 36.68012171607383], [137.82494544982913, 36.68397636535661], [137.82494544982913, 36.68397636535661], [137.84365653991702, 36.69608971975234], [137.84365653991702, 36.69608971975234], [137.84760475158694, 36.69963389154272], [137.84760475158694, 36.69963389154272], [137.8463172912598, 36.709061281169646], [137.8463172912598, 36.709061281169646], [137.8379058837891, 36.71525382744859], [137.8379058837891, 36.71525382744859], [137.82709121704104, 36.721273880045004], [137.82709121704104, 36.721273880045004], [137.8239154815674, 36.72086109150479], [137.8239154815674, 36.72086109150479], [137.8115558624268, 36.71604506128931], [137.8115558624268, 36.71604506128931], [137.80554771423343, 36.715150622433804], [137.80554771423343, 36.715150622433804], [137.7917289733887, 36.713912151442244], [137.7917289733887, 36.713912151442244]];
 const center=[(Math.min(...boundary.map(p=>p[0]))+Math.max(...boundary.map(p=>p[0])))/2,(Math.min(...boundary.map(p=>p[1]))+Math.max(...boundary.map(p=>p[1])))/2];
 const status=document.getElementById('status');let drawing=false,rope=[];
@@ -114,6 +114,37 @@ map.addControl(new maplibregl.NavigationControl(),'bottom-right');
     else map.setPitch(Math.max(0,Math.min(85,g.pitch-dy*0.4)))},{passive:false});
   const end=e=>{if(e.touches.length<2&&g){g=null;map.dragPan.enable()}};
   el.addEventListener('touchend',end,{passive:true});el.addEventListener('touchcancel',end,{passive:true});
+})();
+// 地表追従カメラ：ズーム16以上に寄ったら有効。カメラ直下の地表＋設定高さ(既定20m)にカメラ高度を保つ。
+// 引く(ズームアウト)と解除して通常操作に戻る。地形が未読み込みの場所では前回の地表標高を使う。
+(function groundFollow(){
+  const ON_ZOOM=16,SMOOTH=0.25,MIN_REL=3;
+  const hInput=document.getElementById('followH'),onInput=document.getElementById('followOn'),stateEl=document.getElementById('followState');
+  try{const v=localStorage.getItem('followH');if(v)hInput.value=v}catch(e){}
+  hInput.onchange=()=>{let v=Math.max(2,Math.min(300,+hInput.value||20));hInput.value=v;try{localStorage.setItem('followH',v)}catch(e){};map.triggerRepaint()};
+  let active=false,lastGround=null,zs=null,busy=false;
+  const show=()=>{stateEl.textContent=onInput.checked&&active?'追従中':(onInput.checked?'(ズーム'+ON_ZOOM+'以上で有効)':'')};
+  onInput.onchange=()=>{if(!onInput.checked)active=false;show();map.triggerRepaint()};
+  function groundAt(ll){ // 地形データが読み込み済みのときだけ絶対標高を返す
+    const t=map.terrain;if(!t)return null;
+    try{const {tileID}=t._getOverscaledTileIDFromLngLatZoom(ll,map.transform.tileZoom);const td=t.getTerrainData(tileID);if(!td||!td.tile||!td.tile.dem)return null}catch(e){return null}
+    const q=map.queryTerrainElevation(ll);return (q==null||!isFinite(q))?null:q+map.transform.elevation}
+  map.on('zoomstart',e=>{if(!e.follow)zs=map.getZoom()});
+  map.on('zoomend',e=>{if(e.follow||zs==null)return;const z=map.getZoom();
+    if(z<zs-0.005||z<ON_ZOOM)active=false;else if(z>zs+0.005&&z>=ON_ZOOM&&onInput.checked){active=true;lastGround=null}
+    zs=null;show()});
+  map.on('render',()=>{
+    if(!active||busy||!onInput.checked)return;
+    const tr=map.transform,cam=tr.getCameraPosition(),g=groundAt(cam.lngLat);
+    if(g!=null)lastGround=g;if(lastGround==null)return;
+    const target=lastGround+(+hInput.value||20);
+    const cur=cam.altitude,next=cur+(target-cur)*(cur<lastGround+2?0.6:SMOOTH);
+    const relCur=cur-tr.elevation,relNext=Math.max(MIN_REL,next-tr.elevation);
+    if(relCur<=0)return;
+    const z=Math.max(map.getMinZoom(),Math.min(map.getMaxZoom(),map.getZoom()+Math.log2(relCur/relNext)));
+    if(Math.abs(z-map.getZoom())<0.0005)return;
+    busy=true;try{map.jumpTo({zoom:z},{follow:true})}finally{busy=false}});
+  show();
 })();
 const syncDem=()=>{const want=map.getZoom()<11?'demLow':'dem';const t=map.getTerrain();if(!t||t.source!==want)map.setTerrain({source:want,exaggeration:1})};map.on('zoomend',syncDem);map.once('load',syncDem);
 function feature(points,kind){return {type:'Feature',geometry:{type:kind,coordinates:points},properties:{}}}
