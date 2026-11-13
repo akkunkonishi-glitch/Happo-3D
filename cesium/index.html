@@ -16,6 +16,9 @@ html,body{touch-action:manipulation;-webkit-text-size-adjust:100%}  /* ダブル
 #panel input[type=number]{width:4em;padding:4px}
 #status,#follow{font-size:12px;color:#444}
 #total{font-weight:bold;margin-top:2px;font-size:13px}
+#courseRow{font-size:12px;margin-top:4px;padding-top:4px;border-top:1px solid #ddd}
+#courseRow input[type=range]{width:80px;vertical-align:middle;touch-action:pan-x}
+#courseInfo{font-size:11px;color:#555}
 #ropeList{max-height:170px;overflow-y:auto;touch-action:pan-y;-webkit-overflow-scrolling:touch;margin-top:4px;border-top:1px solid #ddd}
 .rrow{display:flex;align-items:center;gap:4px;padding:3px 2px;border-bottom:1px solid #eee;font-size:12px}
 .rrow.sel{background:#fff4d6}
@@ -48,6 +51,7 @@ html,body{touch-action:manipulation;-webkit-text-size-adjust:100%}  /* ダブル
   <b>八方尾根 3D 管理マップ（Cesium版）</b>
   <div id="status">読み込み中…</div>
   <div><button id="top">真上から</button><button id="oblique">斜めから</button><button id="contour">等高線 ON</button><button id="slope">ゲレンデ向き</button></div>
+  <div id="courseRow"><label><input type="checkbox" id="courseOn" checked>コース</label> 透明度 <input type="range" id="courseAlpha" min="0.1" max="0.9" step="0.05" value="0.45"> <button id="courseSave">GeoJSON保存</button><button id="courseReload">OSM再取得</button><div id="courseInfo">コース読み込み中…</div></div>
   <div><button id="newRope">新しいロープ</button><button id="draw">点を打つ</button><button id="undo">1点戻す</button></div>
   <div id="ropeList"></div>
   <div id="total">合計: 0 m</div>
@@ -426,6 +430,74 @@ const mini=(()=>{
   el.addEventListener('pointerup',end);el.addEventListener('pointercancel',end);
   show();
 })();
+// ===== ゲレンデのコース・リフト（OpenStreetMap）=====
+// 読み込み順：①リポジトリの data/happo-courses.geojson → ②端末に保存した前回の取得結果 → ③ブラウザからOverpass APIで取得。
+// コースは難易度に関係なく一色（薄い水色の半透明）で地形に貼り、縁を濃い線で囲む。中心線だけのコースは幅の帯にする。
+// リフトは白い線＋名前ラベル。「GeoJSON保存」で取得結果をファイルに書き出せる（リポジトリの cesium/data/ に置くと次から①で読む）。
+const COURSE={fill:'#8cecff',edge:'#0090b0',defaultWidth:30,bbox:[36.655,137.76,36.735,137.87],cacheKey:'happoCoursesGeo',
+  overpass:['https://overpass-api.de/api/interpreter','https://overpass.kumi.systems/api/interpreter','https://overpass.private.coffee/api/interpreter']};
+try{viewer.creditDisplay.addStaticCredit(new Cesium.Credit('コース・リフト © OpenStreetMap contributors'))}catch(e){}
+const courseSrc=new Cesium.CustomDataSource('courses');viewer.dataSources.add(courseSrc);
+const courseFillMat=new Cesium.ColorMaterialProperty(Cesium.Color.fromCssColorString(COURSE.fill).withAlpha(0.45));
+const courseEdgeMat=new Cesium.ColorMaterialProperty(Cesium.Color.fromCssColorString(COURSE.edge).withAlpha(0.9));
+let courseGeo=null;
+function osmToGeoJSON(osm){ // Overpass(out geom)の結果をGeoJSONに変換
+  const feats=[],ll=g=>g.map(p=>[+p.lon.toFixed(7),+p.lat.toFixed(7)]);
+  const closed=c=>c.length>3&&c[0][0]===c[c.length-1][0]&&c[0][1]===c[c.length-1][1];
+  function joinRings(ways){const rings=[],pool=ways.map(w=>w.slice());
+    while(pool.length){let r=pool.shift();let grew=true;
+      while(!closed(r)&&grew){grew=false;for(let i=0;i<pool.length;i++){const w=pool[i],a=r[r.length-1],same=(p,q)=>p[0]===q[0]&&p[1]===q[1];
+        if(same(a,w[0])){r=r.concat(w.slice(1))}else if(same(a,w[w.length-1])){r=r.concat(w.slice(0,-1).reverse())}else continue;pool.splice(i,1);grew=true;break}}
+      if(closed(r))rings.push(r)}return rings}
+  for(const e of osm.elements||[]){const t=e.tags||{};
+    if(e.type==='way'&&e.geometry){const c=ll(e.geometry);
+      if(t.aerialway&&!['station','pylon'].includes(t.aerialway))feats.push({type:'Feature',properties:{kind:'lift',name:t.name||t['name:ja']||'',aerialway:t.aerialway,osm:'way/'+e.id},geometry:{type:'LineString',coordinates:c}});
+      else if(t['piste:type']==='downhill'){const isArea=closed(c)&&(t.area==='yes'||t.landuse||t.leisure||t.natural);
+        feats.push({type:'Feature',properties:{kind:isArea?'piste-area':'piste-line',name:t['piste:name']||t.name||'',difficulty:t['piste:difficulty']||'',width:parseFloat(t['piste:width']||t.width)||null,osm:'way/'+e.id},geometry:isArea?{type:'Polygon',coordinates:[c]}:{type:'LineString',coordinates:c}})}}
+    else if(e.type==='relation'&&t['piste:type']==='downhill'&&e.members){
+      const outer=e.members.filter(m=>m.type==='way'&&m.geometry&&m.role!=='inner').map(m=>ll(m.geometry)),inner=e.members.filter(m=>m.type==='way'&&m.geometry&&m.role==='inner').map(m=>ll(m.geometry));
+      const outs=joinRings(outer),ins=joinRings(inner);
+      if(outs.length)feats.push({type:'Feature',properties:{kind:'piste-area',name:t['piste:name']||t.name||'',difficulty:t['piste:difficulty']||'',osm:'relation/'+e.id},geometry:{type:'MultiPolygon',coordinates:outs.map(o=>[o,...ins])}})}}
+  return {type:'FeatureCollection',properties:{source:'OpenStreetMap (Overpass API)',license:'ODbL © OpenStreetMap contributors',fetched:new Date().toISOString(),bbox:COURSE.bbox},features:feats}}
+async function fetchOverpass(){
+  const [s_,w_,n_,e_]=COURSE.bbox,b=s_+','+w_+','+n_+','+e_;
+  const q='[out:json][timeout:60];(way["piste:type"="downhill"]('+b+');relation["piste:type"="downhill"]('+b+');way["aerialway"]('+b+'););out geom;';
+  let last;for(const url of COURSE.overpass){try{const r=await fetch(url,{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:'data='+encodeURIComponent(q)});if(!r.ok)throw new Error('HTTP '+r.status);return osmToGeoJSON(await r.json())}catch(e){last=e}}
+  throw last}
+function offsetLine(c,dist){ // 中心線を左右にずらした線（メートル）。帯の縁を描くのに使う
+  const out=[];for(let i=0;i<c.length;i++){const p=c[Math.max(0,i-1)],q=c[Math.min(c.length-1,i+1)],kx=Math.cos(c[i][1]*Math.PI/180)*111320,ky=110540;
+    let dx=(q[0]-p[0])*kx,dy=(q[1]-p[1])*ky;const L=Math.hypot(dx,dy)||1;dx/=L;dy/=L;out.push([c[i][0]-dy*dist/kx,c[i][1]+dx*dist/ky])}return out}
+function drawCourses(){
+  courseSrc.entities.suspendEvents();courseSrc.entities.removeAll();const f=courseGeo?courseGeo.features:[];let nA=0,nL=0,nLift=0;
+  const deg=c=>Cesium.Cartesian3.fromDegreesArray(c.flat());
+  for(const ft of f){const k=ft.properties.kind,g=ft.geometry;
+    if(k==='piste-area'){const polys=g.type==='Polygon'?[g.coordinates]:g.coordinates;
+      for(const pg of polys){nA++;courseSrc.entities.add({polygon:{hierarchy:new Cesium.PolygonHierarchy(deg(pg[0]),pg.slice(1).map(h=>new Cesium.PolygonHierarchy(deg(h)))),material:courseFillMat,classificationType:Cesium.ClassificationType.TERRAIN}});
+        for(const ring of pg)courseSrc.entities.add({polyline:{positions:deg(ring),width:2,material:courseEdgeMat,clampToGround:true}})}}
+    else if(k==='piste-line'&&g.coordinates.length>=2){nL++;const w=ft.properties.width||COURSE.defaultWidth;
+      courseSrc.entities.add({corridor:{positions:deg(g.coordinates),width:w,material:courseFillMat,classificationType:Cesium.ClassificationType.TERRAIN,cornerType:Cesium.CornerType.ROUNDED}});
+      for(const side of [w/2,-w/2])courseSrc.entities.add({polyline:{positions:deg(offsetLine(g.coordinates,side)),width:2,material:courseEdgeMat,clampToGround:true}})}
+    else if(k==='lift'&&g.coordinates.length>=2){nLift++;const c=g.coordinates,mid=c[Math.floor(c.length/2)];
+      courseSrc.entities.add({polyline:{positions:deg(c),width:3,material:new Cesium.PolylineOutlineMaterialProperty({color:Cesium.Color.WHITE,outlineColor:Cesium.Color.fromCssColorString('#333'),outlineWidth:1}),clampToGround:true}});
+      if(ft.properties.name)courseSrc.entities.add({position:Cesium.Cartesian3.fromDegrees(mid[0],mid[1]),label:{text:ft.properties.name,font:'bold 13px sans-serif',fillColor:Cesium.Color.WHITE,outlineColor:Cesium.Color.BLACK,outlineWidth:3,style:Cesium.LabelStyle.FILL_AND_OUTLINE,heightReference:Cesium.HeightReference.CLAMP_TO_GROUND,pixelOffset:new Cesium.Cartesian2(0,-14),disableDepthTestDistance:Number.POSITIVE_INFINITY,distanceDisplayCondition:new Cesium.DistanceDisplayCondition(0,9000)}})}}
+  courseSrc.entities.resumeEvents();courseSrc.show=document.getElementById('courseOn').checked;scene.requestRender();
+  return {nA,nL,nLift}}
+function showCourseInfo(src,cnt){const d=courseGeo&&courseGeo.properties&&courseGeo.properties.fetched;
+  document.getElementById('courseInfo').textContent='コース面'+cnt.nA+'・中心線'+cnt.nL+'・リフト'+cnt.nLift+'（'+src+(d?'、取得 '+d.slice(0,10):'')+'）'}
+async function loadCourses(force){
+  const info=document.getElementById('courseInfo');
+  if(!force){
+    try{const r=await fetch('data/happo-courses.geojson',{cache:'no-cache'});if(r.ok){courseGeo=await r.json();showCourseInfo('リポジトリのファイル',drawCourses());return}}catch(e){}
+    try{const v=localStorage.getItem(COURSE.cacheKey);if(v){courseGeo=JSON.parse(v);showCourseInfo('端末に保存した取得結果',drawCourses());return}}catch(e){}}
+  info.textContent='OpenStreetMapから取得中…';
+  try{courseGeo=await fetchOverpass();try{localStorage.setItem(COURSE.cacheKey,JSON.stringify(courseGeo))}catch(e){}showCourseInfo('OSMから取得',drawCourses())}
+  catch(e){info.textContent='コースを取得できませんでした（'+(e&&e.message||e)+'）。通信を確認して「OSM再取得」を押してください'}}
+document.getElementById('courseOn').onchange=e=>{courseSrc.show=e.target.checked;scene.requestRender()};
+document.getElementById('courseAlpha').oninput=e=>{const a=+e.target.value;courseFillMat.color=Cesium.Color.fromCssColorString(COURSE.fill).withAlpha(a);courseEdgeMat.color=Cesium.Color.fromCssColorString(COURSE.edge).withAlpha(Math.min(1,a*1.6+0.2));scene.requestRender()};
+document.getElementById('courseReload').onclick=()=>loadCourses(true);
+document.getElementById('courseSave').onclick=()=>{if(!courseGeo){alert('コースデータがまだありません');return}
+  const a=document.createElement('a');a.href=URL.createObjectURL(new Blob([JSON.stringify(courseGeo)],{type:'application/geo+json'}));a.download='happo-courses.geojson';document.body.appendChild(a);a.click();setTimeout(()=>{URL.revokeObjectURL(a.href);a.remove()},1000)};
+loadCourses(false);
 // ===== 視点スティック（左下）=====
 // FPSの右スティックと同じ：左右に倒すとその場で左右に回り、上下に倒すと見上げ・見下ろし。カメラの位置は変えない。
 // 倒している間は一定速度で回り続け、離すと即停止。指ごとに追跡するので、ミニマップなどと同時に操作できる。
