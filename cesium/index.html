@@ -15,7 +15,14 @@ html,body{touch-action:manipulation;-webkit-text-size-adjust:100%}  /* ダブル
 #panel button{padding:7px 9px;margin:3px 2px;border-radius:7px;border:1px solid #aaa;background:#fff;font-size:13px}
 #panel input[type=number]{width:4em;padding:4px}
 #status,#follow{font-size:12px;color:#444}
-#total{font-weight:bold;margin-top:2px}
+#total{font-weight:bold;margin-top:2px;font-size:13px}
+#ropeList{max-height:170px;overflow-y:auto;touch-action:pan-y;-webkit-overflow-scrolling:touch;margin-top:4px;border-top:1px solid #ddd}
+.rrow{display:flex;align-items:center;gap:4px;padding:3px 2px;border-bottom:1px solid #eee;font-size:12px}
+.rrow.sel{background:#fff4d6}
+.rrow .sw{width:14px;height:14px;border-radius:3px;flex:none;border:1px solid #0003}
+.rrow .nm{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;cursor:pointer}
+.rrow .ds{flex:none;color:#444}
+#panel .rrow button{padding:2px 6px;margin:0;font-size:12px}
 #panel small{color:#555;display:block;margin-top:4px}
 #panel a{font-size:12px}
 .cesium-viewer-bottom{font-size:10px}
@@ -41,8 +48,9 @@ html,body{touch-action:manipulation;-webkit-text-size-adjust:100%}  /* ダブル
   <b>八方尾根 3D 管理マップ（Cesium版）</b>
   <div id="status">読み込み中…</div>
   <div><button id="top">真上から</button><button id="oblique">斜めから</button><button id="contour">等高線 ON</button><button id="slope">ゲレンデ向き</button></div>
-  <div><button id="draw">ロープを描く</button><button id="undo">1点戻す</button><button id="clear">消去</button></div>
-  <div id="total">ロープ距離: 0 m</div>
+  <div><button id="newRope">新しいロープ</button><button id="draw">点を打つ</button><button id="undo">1点戻す</button></div>
+  <div id="ropeList"></div>
+  <div id="total">合計: 0 m</div>
   <div><label><input type="checkbox" id="followOn" checked>地表追従</label>（高さは右端のスライダー）</div>
   <div id="follow"></div>
   <small>赤線：指定KML範囲。1本指：地面をつかんで移動（空なら向きを変える）。2本指：広げる＝ズーム／ひねる＝回転／上下＝傾き（地表近くでは見上げ・見下ろし）。右下のミニマップはドラッグで移動、ピンチで縮尺変更。</small>
@@ -216,21 +224,50 @@ let labelTimer=null;const labelSoon=()=>{clearTimeout(labelTimer);labelTimer=set
 camera.percentageChanged=0.1;camera.changed.addEventListener(labelSoon);camera.moveEnd.addEventListener(labelSoon);
 document.getElementById('contour').onclick=()=>{contourOn=!contourOn;globe.material=contourOn?contourMaterial:undefined;document.getElementById('contour').textContent=contourOn?'等高線 ON':'等高線 OFF';updateLabels();scene.requestRender()};
 
-// ===== ロープの点打ちと距離 =====
-let drawing=false,rope=[];
-const ropeLine=viewer.entities.add({polyline:{positions:new Cesium.CallbackProperty(()=>rope,false),width:4,material:Cesium.Color.fromCssColorString('#ffde00'),clampToGround:true}});
-const ropePts=new Cesium.CustomDataSource('rope');viewer.dataSources.add(ropePts);
+// ===== ロープ（複数本）=====
+// 『新しいロープ』で新規開始。連番と色を自動で割り当て。一覧で選択・名前変更・削除。選択中のロープだけ点の追加・1点戻すが効く。
+// データは端末(localStorage)に保存し、再読み込みしても残る。点は経度・緯度・標高で保存。
+const ROPE_COLORS=['#ffde00','#00e5ff','#ff4081','#76ff03','#ff9100','#d500f9','#ffffff','#2979ff'];
+const ROPE_KEY='happoRopes';
+let drawing=false,ropeState={ropes:[],selected:null,nextNo:1};
+try{const v=JSON.parse(localStorage.getItem(ROPE_KEY)||'null');if(v&&Array.isArray(v.ropes))ropeState=v}catch(e){}
+const saveRopes=()=>{try{localStorage.setItem(ROPE_KEY,JSON.stringify(ropeState))}catch(e){}};
+const selRope=()=>ropeState.ropes.find(r=>r.id===ropeState.selected)||null;
+const ropeCart=r=>r.pts.map(q=>Cesium.Cartesian3.fromDegrees(q[0],q[1],q[2]));
 function haversine(a,b){const R=6371000,dl=b.latitude-a.latitude,dn=b.longitude-a.longitude,q=Math.sin(dl/2)**2+Math.cos(a.latitude)*Math.cos(b.latitude)*Math.sin(dn/2)**2;return 2*R*Math.asin(Math.sqrt(q))}
-function updateRope(){
-  ropePts.entities.removeAll();let d=0,s=0;
-  rope.forEach((p,i)=>{ropePts.entities.add({position:p,point:{pixelSize:9,color:Cesium.Color.fromCssColorString('#ffde00'),outlineColor:Cesium.Color.fromCssColorString('#222'),outlineWidth:1,disableDepthTestDistance:Number.POSITIVE_INFINITY}});
-    if(i){d+=haversine(Cesium.Cartographic.fromCartesian(rope[i-1]),Cesium.Cartographic.fromCartesian(p));s+=Cesium.Cartesian3.distance(rope[i-1],p)}});
-  document.getElementById('total').textContent='ロープ距離: 水平 '+Math.round(d)+' m／斜距離 '+Math.round(s)+' m ('+rope.length+'点)';scene.requestRender()}
+function ropeDist(r){let d=0,s=0;const c=ropeCart(r);for(let i=1;i<c.length;i++){d+=haversine(Cesium.Cartographic.fromCartesian(c[i-1]),Cesium.Cartographic.fromCartesian(c[i]));s+=Cesium.Cartesian3.distance(c[i-1],c[i])}return {d,s}}
+const ropeSrc=new Cesium.CustomDataSource('ropes');viewer.dataSources.add(ropeSrc);
+function newRope(){const no=ropeState.nextNo++;const r={id:'r'+Date.now().toString(36)+no,no,name:'ロープ'+no,color:ROPE_COLORS[(no-1)%ROPE_COLORS.length],pts:[]};
+  ropeState.ropes.push(r);ropeState.selected=r.id;return r}
+function drawRopes(){
+  ropeSrc.entities.suspendEvents();ropeSrc.entities.removeAll();
+  for(const r of ropeState.ropes){const c=ropeCart(r),col=Cesium.Color.fromCssColorString(r.color),sel=r.id===ropeState.selected;
+    if(c.length>=2)ropeSrc.entities.add({polyline:{positions:c,width:sel?6:4,material:sel?new Cesium.PolylineOutlineMaterialProperty({color:col,outlineColor:Cesium.Color.BLACK,outlineWidth:1.5}):col,clampToGround:true}});
+    if(sel||c.length===1)c.forEach(p=>ropeSrc.entities.add({position:p,point:{pixelSize:sel?9:6,color:col,outlineColor:Cesium.Color.fromCssColorString('#222'),outlineWidth:1,disableDepthTestDistance:Number.POSITIVE_INFINITY}}))}
+  ropeSrc.entities.resumeEvents();
+  // 一覧と距離
+  const list=document.getElementById('ropeList');list.textContent='';let td=0,ts=0;
+  for(const r of ropeState.ropes){const {d,s}=ropeDist(r);td+=d;ts+=s;
+    const row=document.createElement('div');row.className='rrow'+(r.id===ropeState.selected?' sel':'');
+    const sw=document.createElement('span');sw.className='sw';sw.style.background=r.color;
+    const nm=document.createElement('span');nm.className='nm';nm.textContent=r.name;nm.onclick=()=>{ropeState.selected=r.id;saveRopes();drawRopes()};
+    const ds=document.createElement('span');ds.className='ds';ds.textContent=Math.round(d)+'m';ds.title='水平 '+Math.round(d)+' m／斜距離 '+Math.round(s)+' m／'+r.pts.length+'点';
+    const rn=document.createElement('button');rn.textContent='名前';rn.onclick=()=>{const v=prompt('ロープの名前',r.name);if(v&&v.trim()){r.name=v.trim().slice(0,40);saveRopes();drawRopes()}};
+    const del=document.createElement('button');del.textContent='削除';del.onclick=()=>{if(!confirm('「'+r.name+'」を削除しますか？'))return;ropeState.ropes=ropeState.ropes.filter(x=>x!==r);if(ropeState.selected===r.id)ropeState.selected=null;saveRopes();drawRopes()};
+    row.append(sw,nm,ds,rn,del);list.appendChild(row)}
+  if(!ropeState.ropes.length){const e=document.createElement('div');e.className='rrow';e.textContent='ロープはまだありません';list.appendChild(e)}
+  const sr=selRope(),sd=sr&&ropeDist(sr);
+  document.getElementById('total').textContent=(sr?'選択中「'+sr.name+'」 水平 '+Math.round(sd.d)+' m／斜距離 '+Math.round(sd.s)+' m（'+sr.pts.length+'点）　':'')+'全体の合計: 水平 '+Math.round(td)+' m／斜距離 '+Math.round(ts)+' m';
+  scene.requestRender();try{mini.request()}catch(e){}}
 const clickHandler=new Cesium.ScreenSpaceEventHandler(scene.canvas);
-clickHandler.setInputAction(e=>{if(!drawing)return;const ray=camera.getPickRay(e.position);const p=ray&&globe.pick(ray,scene);if(p){rope.push(p);updateRope()}},Cesium.ScreenSpaceEventType.LEFT_CLICK);
-document.getElementById('draw').onclick=()=>{drawing=!drawing;document.getElementById('draw').textContent=drawing?'描画終了':'ロープを描く';scene.canvas.style.cursor=drawing?'crosshair':''};
-document.getElementById('undo').onclick=()=>{rope.pop();updateRope()};
-document.getElementById('clear').onclick=()=>{rope=[];updateRope()};
+clickHandler.setInputAction(e=>{if(!drawing)return;const ray=camera.getPickRay(e.position);const p=ray&&globe.pick(ray,scene);if(!p)return;
+  const r=selRope()||newRope(),k=Cesium.Cartographic.fromCartesian(p);
+  r.pts.push([+Cesium.Math.toDegrees(k.longitude).toFixed(7),+Cesium.Math.toDegrees(k.latitude).toFixed(7),+k.height.toFixed(2)]);saveRopes();drawRopes()},Cesium.ScreenSpaceEventType.LEFT_CLICK);
+const setDrawing=v=>{drawing=v;document.getElementById('draw').textContent=drawing?'打つのを終了':'点を打つ';scene.canvas.style.cursor=drawing?'crosshair':''};
+document.getElementById('newRope').onclick=()=>{newRope();saveRopes();setDrawing(true);drawRopes()};
+document.getElementById('draw').onclick=()=>{if(!drawing&&!selRope())newRope();setDrawing(!drawing);drawRopes()};
+document.getElementById('undo').onclick=()=>{const r=selRope();if(r&&r.pts.length){r.pts.pop();saveRopes();drawRopes()}};
+drawRopes();
 
 // ===== 地表追従カメラ =====
 // カメラが地表から300m以内に寄ると有効。カメラ直下の地表＋設定高さ(既定20m)を保ち、登りでは上げ、下りでは下げる。
@@ -337,7 +374,7 @@ const mini=(()=>{
     for(let ty=y0;ty<=y1;ty++)for(let tx=x0;tx<=x1;tx++){const im=tile(zi,tx,ty);if(im)ctx.drawImage(im,tx*256-wx,ty*256-wy,256.5,256.5)}
     const line=(pts,color,w)=>{if(pts.length<2)return;ctx.beginPath();pts.forEach((q,i)=>{const [px,py]=toWorld(q[0],q[1],zi);i?ctx.lineTo(px-wx,py-wy):ctx.moveTo(px-wx,py-wy)});ctx.strokeStyle=color;ctx.lineWidth=w/sc;ctx.stroke()};
     line([...boundary,boundary[0]],'#f44336',2.5);
-    line(rope.map(p=>{const k=Cesium.Cartographic.fromCartesian(p);return [Cesium.Math.toDegrees(k.longitude),Cesium.Math.toDegrees(k.latitude)]}),'#e6b800',3);
+    for(const r of ropeState.ropes)line(r.pts,r.color,r.id===ropeState.selected?4:2.5);
     ctx.restore();
     // 視線方向の扇（画面上＝カメラの向き）
     const fr=camera.frustum,fovx=fr.aspectRatio>=1?fr.fov:2*Math.atan(Math.tan(fr.fov/2)*fr.aspectRatio),r=S*0.36;
