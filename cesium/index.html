@@ -2,13 +2,15 @@
 <html lang="ja">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1">
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no">
 <title>八方尾根3D管理 Cesium版</title>
 <script>window.CESIUM_BASE_URL='https://cdn.jsdelivr.net/npm/cesium@1.123.0/Build/Cesium/';</script>
 <script src="https://cdn.jsdelivr.net/npm/cesium@1.123.0/Build/Cesium/Cesium.js"></script>
 <link href="https://cdn.jsdelivr.net/npm/cesium@1.123.0/Build/Cesium/Widgets/widgets.css" rel="stylesheet">
 <style>
 html,body,#cesium{margin:0;width:100%;height:100%;overflow:hidden;font-family:system-ui;background:#c5d7e4}
+html,body{touch-action:manipulation;-webkit-text-size-adjust:100%}  /* ダブルタップ拡大と300ms遅延を無効化 */
+#panel,#mini,#stick,#hslider{touch-action:none;-webkit-user-select:none;user-select:none;-webkit-touch-callout:none}
 #panel{position:absolute;top:12px;left:12px;z-index:10;background:#ffffffee;padding:10px 12px;border-radius:12px;max-width:270px;box-shadow:0 2px 12px #0003;font-size:14px}
 #panel button{padding:7px 9px;margin:3px 2px;border-radius:7px;border:1px solid #aaa;background:#fff;font-size:13px}
 #panel input[type=number]{width:4em;padding:4px}
@@ -19,6 +21,9 @@ html,body,#cesium{margin:0;width:100%;height:100%;overflow:hidden;font-family:sy
 .cesium-viewer-bottom{font-size:10px}
 #mini{position:absolute;right:12px;bottom:34px;z-index:10;border-radius:12px;overflow:hidden;box-shadow:0 2px 12px #0005;background:#e8e8e0;touch-action:none;border:2px solid #fff}
 #mini canvas{display:block;touch-action:none}
+#stick{position:absolute;left:18px;bottom:40px;z-index:10;width:130px;height:130px;border-radius:50%;background:rgba(255,255,255,0.22);border:2px solid rgba(255,255,255,0.75);box-shadow:0 2px 10px #0004}
+#stick .knob{position:absolute;left:50%;top:50%;width:56px;height:56px;margin:-28px 0 0 -28px;border-radius:50%;background:rgba(255,255,255,0.9);box-shadow:0 1px 6px #0006;pointer-events:none}
+#stick .lbl{position:absolute;width:100%;top:-18px;text-align:center;font-size:11px;color:#fff;text-shadow:0 0 3px #000;pointer-events:none}
 #hslider{position:absolute;right:14px;top:50%;margin-top:-170px;z-index:10;width:56px;height:250px;touch-action:none;user-select:none;-webkit-user-select:none}
 #hslider .cap{position:absolute;top:-2px;left:0;width:56px;text-align:center;font-size:11px;color:#fff;text-shadow:0 0 3px #000}
 #hslider .track{position:absolute;left:25px;top:22px;bottom:12px;width:6px;border-radius:3px;background:rgba(255,255,255,0.75);box-shadow:0 0 4px #0006}
@@ -30,6 +35,7 @@ html,body,#cesium{margin:0;width:100%;height:100%;overflow:hidden;font-family:sy
 <body>
 <div id="cesium"></div>
 <div id="mini"><canvas id="miniCanvas"></canvas></div>
+<div id="stick"><div class="lbl">視点</div><div class="knob"></div></div>
 <div id="hslider"><div class="cap">地表から</div><div class="track"></div><div class="thumb"><span class="val"></span></div></div>
 <div id="panel">
   <b>八方尾根 3D 管理マップ（Cesium版）</b>
@@ -63,7 +69,9 @@ const SETTINGS={
   resetPitch:-15,    // 「ゲレンデ向き」ボタンの傾き(度、マイナスで見下ろし、0で水平)
   resetHeight:20,    // 「ゲレンデ向き」ボタンでの地表からの高さ(m)。nullにすると今の高さのまま
   minimapZoom:15,    // ミニマップの既定の縮尺(ズーム。大きいほど拡大)
-  minimapSize:200    // ミニマップの大きさ(px)
+  minimapSize:200,   // ミニマップの大きさ(px)
+  stickYawSpeed:60,  // 視点スティック：左右に回る速さ(度/秒、倒し量に関係なく一定)
+  stickPitchSpeed:40 // 視点スティック：見上げ・見下ろしの速さ(度/秒)
 };
 
 // ===== 国土地理院DEM（PNG標高タイル）=====
@@ -381,6 +389,31 @@ const mini=(()=>{
   el.addEventListener('pointerup',end);el.addEventListener('pointercancel',end);
   show();
 })();
+// ===== 視点スティック（左下）=====
+// FPSの右スティックと同じ：左右に倒すとその場で左右に回り、上下に倒すと見上げ・見下ろし。カメラの位置は変えない。
+// 倒している間は一定速度で回り続け、離すと即停止。指ごとに追跡するので、ミニマップなどと同時に操作できる。
+(function viewStick(){
+  const el=document.getElementById('stick'),knob=el.querySelector('.knob');
+  let pid=null,dirX=0,dirY=0,last=0,raf=0;
+  function setDir(e){const r=el.getBoundingClientRect(),R=r.width/2,x=e.clientX-r.left-R,y=e.clientY-r.top-R,d=Math.hypot(x,y),k=d>R*0.6?R*0.6/d:1;
+    knob.style.transform='translate('+x*k+'px,'+y*k+'px)';
+    if(d<R*0.18){dirX=dirY=0;return}  // 中央付近は止まる
+    dirX=Math.abs(x)>d*0.38?Math.sign(x):0;dirY=Math.abs(y)>d*0.38?Math.sign(y):0}  // 倒した向きだけを見る（倒し量で速さは変えない）
+  function tick(t){if(pid===null)return;let dt=(t-last)/1000;last=t;dt=dt>1||dt<0?0:Math.min(dt,0.25);  // 実際の経過時間で回す＝フレームが落ちても速さ一定（タブ復帰時の飛びだけ防ぐ）
+    if(dirX||dirY){const pitch=Math.max(-Cesium.Math.PI_OVER_TWO+0.01,Math.min(Cesium.Math.toRadians(60),camera.pitch-dirY*Cesium.Math.toRadians(SETTINGS.stickPitchSpeed)*dt));
+      camera.setView({orientation:{heading:camera.heading+dirX*Cesium.Math.toRadians(SETTINGS.stickYawSpeed)*dt,pitch,roll:0}});scene.requestRender()}
+    raf=requestAnimationFrame(tick)}
+  el.addEventListener('pointerdown',e=>{if(pid!==null)return;pid=e.pointerId;el.setPointerCapture(pid);setDir(e);last=performance.now();cancelAnimationFrame(raf);raf=requestAnimationFrame(tick);e.preventDefault()});
+  el.addEventListener('pointermove',e=>{if(e.pointerId===pid){setDir(e);e.preventDefault()}});
+  const end=e=>{if(e.pointerId!==pid)return;pid=null;dirX=dirY=0;cancelAnimationFrame(raf);knob.style.transform=''};
+  el.addEventListener('pointerup',end);el.addEventListener('pointercancel',end);el.addEventListener('lostpointercapture',end);
+})();
+// ===== iPad Safariのページ全体の拡大を防ぐ（user-scalable=noが無視される場合の対策）=====
+for(const t of ['gesturestart','gesturechange','gestureend'])document.addEventListener(t,e=>e.preventDefault(),{passive:false});
+{let lastEnd=0;document.addEventListener('touchend',e=>{const now=Date.now();
+  if(now-lastEnd<350&&!e.target.closest('button,input,label,a'))e.preventDefault();  // 素早い2回目のタップによる拡大を止める
+  lastEnd=now},{passive:false});}
+document.addEventListener('dblclick',e=>e.preventDefault(),{passive:false});
 // ===== 「ゲレンデ向き」：本体カメラとミニマップを方位250度・既定の傾きに戻す（数値はSETTINGSで変更）=====
 document.getElementById('slope').onclick=()=>{
   const c=camera.positionCartographic;let h=c.height;
