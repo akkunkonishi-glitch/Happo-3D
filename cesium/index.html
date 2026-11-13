@@ -1,0 +1,272 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1">
+<title>八方尾根3D管理 Cesium版</title>
+<script>window.CESIUM_BASE_URL='https://cdn.jsdelivr.net/npm/cesium@1.123.0/Build/Cesium/';</script>
+<script src="https://cdn.jsdelivr.net/npm/cesium@1.123.0/Build/Cesium/Cesium.js"></script>
+<link href="https://cdn.jsdelivr.net/npm/cesium@1.123.0/Build/Cesium/Widgets/widgets.css" rel="stylesheet">
+<style>
+html,body,#cesium{margin:0;width:100%;height:100%;overflow:hidden;font-family:system-ui;background:#c5d7e4}
+#panel{position:absolute;top:12px;left:12px;z-index:10;background:#ffffffee;padding:10px 12px;border-radius:12px;max-width:270px;box-shadow:0 2px 12px #0003;font-size:14px}
+#panel button{padding:7px 9px;margin:3px 2px;border-radius:7px;border:1px solid #aaa;background:#fff;font-size:13px}
+#panel input[type=number]{width:4em;padding:4px}
+#status,#follow{font-size:12px;color:#444}
+#total{font-weight:bold;margin-top:2px}
+#panel small{color:#555;display:block;margin-top:4px}
+#panel a{font-size:12px}
+.cesium-viewer-bottom{font-size:10px}
+</style>
+</head>
+<body>
+<div id="cesium"></div>
+<div id="panel">
+  <b>八方尾根 3D 管理マップ（Cesium版）</b>
+  <div id="status">読み込み中…</div>
+  <div><button id="top">真上から</button><button id="oblique">斜めから</button><button id="contour">等高線 ON</button></div>
+  <div><button id="draw">ロープを描く</button><button id="undo">1点戻す</button><button id="clear">消去</button></div>
+  <div id="total">ロープ距離: 0 m</div>
+  <div><label><input type="checkbox" id="followOn" checked>地表追従</label> 高さ <input id="followH" type="number" value="20" min="2" max="300" step="1">m</div>
+  <div id="follow"></div>
+  <small>赤線：指定KML範囲。2本指：広げる＝ズーム／ひねる＝回転／上下＝傾き（地表近くでは見上げ・見下ろし）。</small>
+  <a href="../">MapLibre版と比較する</a>
+</div>
+<script>
+'use strict';
+const statusEl=document.getElementById('status');
+if(!window.Cesium){statusEl.textContent='Cesiumを読み込めませんでした。通信を確認してください。';throw new Error('no Cesium')}
+Cesium.Ion.defaultAccessToken='';  // Cesium ionは使わない（トークン不要）
+
+const boundary=[[137.79031276702884, 36.71360253057494], [137.79031276702884, 36.71360253057494], [137.78507709503177, 36.709955790915565], [137.78507709503177, 36.709955790915565], [137.78447628021243, 36.705345513841785], [137.78447628021243, 36.705345513841785], [137.7805280685425, 36.68999886813347], [137.7805280685425, 36.68999886813347], [137.7827596664429, 36.685456224030055], [137.7827596664429, 36.685456224030055], [137.80009746551517, 36.673065830877334], [137.80009746551517, 36.673065830877334], [137.8038311004639, 36.67110383562481], [137.8038311004639, 36.67110383562481], [137.808895111084, 36.67351329647276], [137.808895111084, 36.67351329647276], [137.81473159790042, 36.68012171607383], [137.81473159790042, 36.68012171607383], [137.82494544982913, 36.68397636535661], [137.82494544982913, 36.68397636535661], [137.84365653991702, 36.69608971975234], [137.84365653991702, 36.69608971975234], [137.84760475158694, 36.69963389154272], [137.84760475158694, 36.69963389154272], [137.8463172912598, 36.709061281169646], [137.8463172912598, 36.709061281169646], [137.8379058837891, 36.71525382744859], [137.8379058837891, 36.71525382744859], [137.82709121704104, 36.721273880045004], [137.82709121704104, 36.721273880045004], [137.8239154815674, 36.72086109150479], [137.8239154815674, 36.72086109150479], [137.8115558624268, 36.71604506128931], [137.8115558624268, 36.71604506128931], [137.80554771423343, 36.715150622433804], [137.80554771423343, 36.715150622433804], [137.7917289733887, 36.713912151442244], [137.7917289733887, 36.713912151442244]];
+// 表示範囲：北アルプス全体
+const LIMIT={west:137.3,south:36.0,east:138.2,north:36.9,maxHeight:60000};
+const limitRect=Cesium.Rectangle.fromDegrees(137.25,35.95,138.25,36.95);
+
+// ===== 国土地理院DEM（PNG標高タイル）=====
+// h=(R*65536+G*256+B)/100、x=0x800000は無効値、x>0x800000は負値。ズーム14以下=10m(dem_png)、ズーム15=5m(dem5a_png)。
+// 5mの無効値・欠けは10mの値を補間して埋め、それも無ければ周囲の値→0。PNGは自前で解凍し、ブラウザの色補正の影響を受けない。
+async function gsiHeights(z,x,y,signal){
+  const GSI='https://cyberjapandata.gsi.go.jp/xyz/';
+  async function heights(layer,lz,lx,ly,sig){
+    const r=await fetch(GSI+layer+'/'+lz+'/'+lx+'/'+ly+'.png',{signal:sig});if(!r.ok)return null;
+    const buf=new Uint8Array(await r.arrayBuffer());
+    const u32=o=>((buf[o]<<24)|(buf[o+1]<<16)|(buf[o+2]<<8)|buf[o+3])>>>0;
+    let o=8,W=0,H=0,depth=0,ctype=0,inter=0,plte=null,trns=null;const idat=[];
+    while(o<buf.length){const len=u32(o),type=String.fromCharCode(buf[o+4],buf[o+5],buf[o+6],buf[o+7]),d=buf.subarray(o+8,o+8+len);
+      if(type==='IHDR'){W=u32(o+8);H=u32(o+12);depth=d[8];ctype=d[9];inter=d[12]}else if(type==='PLTE')plte=d;else if(type==='tRNS')trns=d;else if(type==='IDAT')idat.push(d);else if(type==='IEND')break;o+=12+len}
+    if(W!==256||H!==256||depth!==8||inter!==0||![0,2,3,4,6].includes(ctype))return null;
+    const raw=new Uint8Array(await new Response(new Blob(idat).stream().pipeThrough(new DecompressionStream('deflate'))).arrayBuffer());
+    const bpp={0:1,2:3,3:1,4:2,6:4}[ctype],stride=W*bpp,px=new Uint8Array(H*stride);
+    for(let row=0;row<H;row++){const f=raw[row*(stride+1)],src=row*(stride+1)+1,dst=row*stride,up=dst-stride;
+      for(let i=0;i<stride;i++){const v=raw[src+i],a=i>=bpp?px[dst+i-bpp]:0,b=row?px[up+i]:0,c=(row&&i>=bpp)?px[up+i-bpp]:0;let pr;
+        if(f===0)pr=0;else if(f===1)pr=a;else if(f===2)pr=b;else if(f===3)pr=(a+b)>>1;else{const p=a+b-c,pa=Math.abs(p-a),pb=Math.abs(p-b),pc=Math.abs(p-c);pr=(pa<=pb&&pa<=pc)?a:(pb<=pc?b:c)}
+        px[dst+i]=(v+pr)&255}}
+    const h=new Float32Array(65536);
+    for(let k=0;k<65536;k++){let R,G,B,A=255;
+      if(ctype===2){R=px[k*3];G=px[k*3+1];B=px[k*3+2];if(trns&&trns.length>=6&&R===trns[1]&&G===trns[3]&&B===trns[5])A=0}
+      else if(ctype===6){R=px[k*4];G=px[k*4+1];B=px[k*4+2];A=px[k*4+3]}
+      else if(ctype===3){const q=px[k];R=plte[q*3];G=plte[q*3+1];B=plte[q*3+2];if(trns&&q<trns.length)A=trns[q]}
+      else{R=G=B=px[k*bpp];if(ctype===4)A=px[k*2+1]}
+      const v=R*65536+G*256+B;h[k]=(A===0||v===8388608)?NaN:(v>8388608?(v-16777216)/100:v/100)}
+    return h}
+  function fill(h){
+    for(let pass=0;pass<2;pass++){const at=pass?(i,j)=>i*256+j:(i,j)=>j*256+i;
+      for(let j=0;j<256;j++){let last=NaN;const fwd=new Float32Array(256);
+        for(let i=0;i<256;i++){const v=h[at(i,j)];if(!Number.isNaN(v))last=v;fwd[i]=last}last=NaN;
+        for(let i=255;i>=0;i--){const k=at(i,j),v=h[k];if(!Number.isNaN(v)){last=v;continue}const L=fwd[i];h[k]=Number.isNaN(L)?last:(Number.isNaN(last)?L:(L+last)/2)}}}
+    for(let k=0;k<65536;k++)if(Number.isNaN(h[k]))h[k]=0;return h}
+  function parent10(px_,py_){
+    const C=globalThis.__gsiParent||(globalThis.__gsiParent=new Map()),key=px_+'/'+py_;
+    if(!C.has(key)){const pr=heights('dem_png',14,px_,py_).then(h=>h&&fill(h));pr.catch(()=>C.delete(key));C.set(key,pr);if(C.size>24)C.delete(C.keys().next().value)}
+    return C.get(key)}
+  let h;
+  if(z<=14){h=await heights('dem_png',z,x,y,signal);if(!h)return new Float32Array(65536);fill(h)}
+  else{
+    h=await heights('dem5a_png',15,x,y,signal);let hasNA=!h;
+    if(h)for(let k=0;k<65536;k++)if(Number.isNaN(h[k])){hasNA=true;break}
+    if(hasNA){let P=null;try{P=await parent10(x>>1,y>>1)}catch(e){}
+      if(!h){if(!P)return new Float32Array(65536);h=new Float32Array(65536).fill(NaN)}
+      if(P){const ox=(x&1)*128,oy=(y&1)*128;
+        for(let row=0;row<256;row++)for(let col=0;col<256;col++){const k=row*256+col;if(!Number.isNaN(h[k]))continue;
+          const fx=Math.min(255,Math.max(0,ox+(col+0.5)/2-0.5)),fy=Math.min(255,Math.max(0,oy+(row+0.5)/2-0.5)),x0=Math.floor(fx),y0=Math.floor(fy),x1=Math.min(255,x0+1),y1=Math.min(255,y0+1),tx=fx-x0,ty=fy-y0;
+          h[k]=(P[y0*256+x0]*(1-tx)+P[y0*256+x1]*tx)*(1-ty)+(P[y1*256+x0]*(1-tx)+P[y1*256+x1]*tx)*ty}}
+      fill(h)}}
+  return h}
+// 標高処理は別スレッド(Worker)で行い、画面の操作を止めない
+let demWorker=null,demSeq=0;const demPending=new Map();
+try{if(typeof DecompressionStream!=='undefined'){
+  const src=gsiHeights.toString()+";self.onmessage=async e=>{const m=e.data;try{const h=await gsiHeights(m.z,m.x,m.y);self.postMessage({id:m.id,h},[h.buffer])}catch(err){self.postMessage({id:m.id,err:String(err)})}};";
+  demWorker=new Worker(URL.createObjectURL(new Blob([src],{type:'text/javascript'})));
+  demWorker.onmessage=e=>{const p=demPending.get(e.data.id);if(!p)return;demPending.delete(e.data.id);e.data.h?p.res(e.data.h):p.rej(e.data.err)};
+  demWorker.onerror=()=>{demWorker=null;for(const p of demPending.values())p.rej('worker');demPending.clear()}}}catch(e){demWorker=null}
+function demCall(z,x,y){
+  if(!demWorker)return gsiHeights(z,x,y);
+  return new Promise((res,rej)=>{const id=++demSeq;demPending.set(id,{res,rej});demWorker.postMessage({id,z,x,y})}).catch(()=>gsiHeights(z,x,y))}
+
+// ===== 地形・航空写真 =====
+const merc=new Cesium.WebMercatorTilingScheme();
+const terrainProvider=new Cesium.CustomHeightmapTerrainProvider({
+  width:256,height:256,tilingScheme:merc,credit:'国土地理院 数値標高モデル(10m/5m)',
+  callback:(x,y,level)=>{
+    const r=merc.tileXYToRectangle(x,y,level);
+    if(level<1||!Cesium.Rectangle.intersection(r,limitRect))return new Float32Array(65536); // 範囲外は読まない
+    return demCall(level,x,y)}});
+terrainProvider.getTileDataAvailable=(x,y,level)=>level<=15;  // ズーム16以上は15を細分化して使う
+const imagery=new Cesium.UrlTemplateImageryProvider({
+  url:'https://cyberjapandata.gsi.go.jp/xyz/seamlessphoto/{z}/{x}/{y}.jpg',
+  tilingScheme:merc,minimumLevel:2,maximumLevel:18,rectangle:limitRect,credit:'国土地理院 シームレス空中写真'});
+
+const viewer=new Cesium.Viewer('cesium',{
+  baseLayer:new Cesium.ImageryLayer(imagery),terrainProvider,
+  baseLayerPicker:false,geocoder:false,homeButton:false,sceneModePicker:false,navigationHelpButton:false,
+  animation:false,timeline:false,fullscreenButton:false,infoBox:false,selectionIndicator:false,
+  requestRenderMode:true,maximumRenderTimeChange:Infinity,msaaSamples:1});
+const scene=viewer.scene,globe=scene.globe,camera=viewer.camera,ssc=scene.screenSpaceCameraController;
+// iPad向けに控えめな設定
+globe.cartographicLimitRectangle=limitRect;   // 北アルプス範囲の外は描画しない
+globe.maximumScreenSpaceError=3;               // 既定2より粗め＝読み込むタイルを減らす
+globe.tileCacheSize=80;globe.loadingDescendantLimit=8;globe.preloadSiblings=false;
+globe.depthTestAgainstTerrain=true;globe.enableLighting=false;globe.baseColor=Cesium.Color.fromCssColorString('#c5d7e4');
+scene.fog.enabled=true;viewer.shadows=false;
+ssc.minimumZoomDistance=2;ssc.maximumZoomDistance=LIMIT.maxHeight;ssc.enableCollisionDetection=true;
+
+// ===== KML範囲（赤線）=====
+viewer.entities.add({polyline:{positions:Cesium.Cartesian3.fromDegreesArray([...boundary,boundary[0]].flat()),width:3,material:Cesium.Color.fromCssColorString('#f44336'),clampToGround:true}});
+
+// ===== 初期視点 =====
+function viewOblique(duration){camera.flyTo({destination:Cesium.Cartesian3.fromDegrees(137.814,36.618,7500),orientation:{heading:0,pitch:Cesium.Math.toRadians(-32),roll:0},duration})}
+function viewTop(duration){camera.flyTo({destination:Cesium.Cartesian3.fromDegrees(137.814,36.696,12000),orientation:{heading:0,pitch:-Cesium.Math.PI_OVER_TWO,roll:0},duration})}
+viewOblique(0);
+document.getElementById('top').onclick=()=>{releaseFollow();viewTop(1)};
+document.getElementById('oblique').onclick=()=>{releaseFollow();viewOblique(1)};
+
+// ===== 等高線：10m(細・薄)と50m(太)を地表の標高から描く =====
+const contourMaterial=new Cesium.Material({fabric:{type:'HappoContour',
+  uniforms:{minorColor:new Cesium.Color(1,1,1,0.35),majorColor:new Cesium.Color(1,0.95,0.77,0.9),minorSpacing:10,majorSpacing:50,minorWidth:1.0,majorWidth:2.4},
+  source:`uniform vec4 minorColor;uniform vec4 majorColor;uniform float minorSpacing;uniform float majorSpacing;uniform float minorWidth;uniform float majorWidth;
+czm_material czm_getMaterial(czm_materialInput materialInput){
+  czm_material material=czm_getDefaultMaterial(materialInput);
+  float h=materialInput.height;
+  float dF=max(abs(dFdx(h)),abs(dFdy(h)))*czm_pixelRatio;
+  float dMin=mod(h,minorSpacing);dMin=min(dMin,minorSpacing-dMin);
+  float dMaj=mod(h,majorSpacing);dMaj=min(dMaj,majorSpacing-dMaj);
+  vec4 c=vec4(0.0);
+  bool minorOk=dF*minorWidth<minorSpacing*0.3, majorOk=dF*majorWidth<majorSpacing*0.3;  // 線が混みすぎる距離では出さない
+  if(minorOk&&dMin<dF*minorWidth*0.5)c=minorColor;
+  if(majorOk&&dMaj<dF*majorWidth*0.5)c=majorColor;
+  vec4 o=czm_gammaCorrect(c);material.diffuse=o.rgb;material.alpha=o.a;return material;}`}});
+globe.material=contourMaterial;
+// 50mごとの数字：画面中心付近のDEM(10m)から50mの線をまたぐ地点を探して置く
+const labelSource=new Cesium.CustomDataSource('contourLabels');viewer.dataSources.add(labelSource);
+const labelTiles=new Map();let contourOn=true,labelSeq=0;
+async function updateLabels(){
+  const seq=++labelSeq;
+  const carto=camera.positionCartographic,g=globe.getHeight(carto);
+  if(!contourOn||g===undefined||carto.height-g>3500){labelSource.entities.removeAll();scene.requestRender();return}
+  const ray=camera.getPickRay(new Cesium.Cartesian2(scene.canvas.clientWidth/2,scene.canvas.clientHeight*0.6));
+  const hit=ray&&globe.pick(ray,scene);const c=hit?Cesium.Cartographic.fromCartesian(hit):carto;
+  const n=1<<14,lon=Cesium.Math.toDegrees(c.longitude),lat=Cesium.Math.toDegrees(c.latitude);
+  const tx=Math.floor((lon+180)/360*n),ty=Math.floor((1-Math.log(Math.tan(c.latitude)+1/Math.cos(c.latitude))/Math.PI)/2*n);
+  const tiles=[];for(let dy=-1;dy<=1;dy++)for(let dx=-1;dx<=1;dx++)tiles.push([tx+dx,ty+dy]);
+  const data=await Promise.all(tiles.map(([x,y])=>{const k=x+'/'+y;if(!labelTiles.has(k)){labelTiles.set(k,demCall(14,x,y));if(labelTiles.size>18)labelTiles.delete(labelTiles.keys().next().value)}return labelTiles.get(k)}));
+  if(seq!==labelSeq)return;
+  const used=new Set(),labels=[],STEP=8;
+  tiles.forEach(([x,y],i)=>{const h=data[i];if(!h)return;
+    for(let r=0;r+STEP<256;r+=STEP)for(let col=0;col+STEP<256;col+=STEP){
+      const a=h[r*256+col];for(const [r2,c2] of [[r,col+STEP],[r+STEP,col]]){const b=h[r2*256+c2],la=Math.floor(a/50),lb=Math.floor(b/50);if(la===lb)continue;
+        const L=Math.max(la,lb)*50,t=(L-a)/(b-a),pr=r+(r2-r)*t,pc=col+(c2-col)*t;
+        const LON=(x+(pc+0.5)/256)/n*360-180,LAT=Math.atan(Math.sinh(Math.PI*(1-2*(y+(pr+0.5)/256)/n)))*180/Math.PI;
+        const key=L+'_'+Math.floor(LON/0.004)+'_'+Math.floor(LAT/0.003);if(used.has(key))continue;used.add(key);labels.push([LON,LAT,L])}}});
+  labelSource.entities.suspendEvents();labelSource.entities.removeAll();
+  for(const [LON,LAT,L] of labels.slice(0,70))labelSource.entities.add({position:Cesium.Cartesian3.fromDegrees(LON,LAT,L+2),label:{text:L+'m',font:'bold 13px sans-serif',fillColor:Cesium.Color.WHITE,outlineColor:Cesium.Color.BLACK,outlineWidth:3,style:Cesium.LabelStyle.FILL_AND_OUTLINE,distanceDisplayCondition:new Cesium.DistanceDisplayCondition(0,3500)}});
+  labelSource.entities.resumeEvents();scene.requestRender()}
+let labelTimer=null;const labelSoon=()=>{clearTimeout(labelTimer);labelTimer=setTimeout(updateLabels,400)};
+camera.percentageChanged=0.1;camera.changed.addEventListener(labelSoon);camera.moveEnd.addEventListener(labelSoon);
+document.getElementById('contour').onclick=()=>{contourOn=!contourOn;globe.material=contourOn?contourMaterial:undefined;document.getElementById('contour').textContent=contourOn?'等高線 ON':'等高線 OFF';updateLabels();scene.requestRender()};
+
+// ===== ロープの点打ちと距離 =====
+let drawing=false,rope=[];
+const ropeLine=viewer.entities.add({polyline:{positions:new Cesium.CallbackProperty(()=>rope,false),width:4,material:Cesium.Color.fromCssColorString('#ffde00'),clampToGround:true}});
+const ropePts=new Cesium.CustomDataSource('rope');viewer.dataSources.add(ropePts);
+function haversine(a,b){const R=6371000,dl=b.latitude-a.latitude,dn=b.longitude-a.longitude,q=Math.sin(dl/2)**2+Math.cos(a.latitude)*Math.cos(b.latitude)*Math.sin(dn/2)**2;return 2*R*Math.asin(Math.sqrt(q))}
+function updateRope(){
+  ropePts.entities.removeAll();let d=0,s=0;
+  rope.forEach((p,i)=>{ropePts.entities.add({position:p,point:{pixelSize:9,color:Cesium.Color.fromCssColorString('#ffde00'),outlineColor:Cesium.Color.fromCssColorString('#222'),outlineWidth:1,disableDepthTestDistance:Number.POSITIVE_INFINITY}});
+    if(i){d+=haversine(Cesium.Cartographic.fromCartesian(rope[i-1]),Cesium.Cartographic.fromCartesian(p));s+=Cesium.Cartesian3.distance(rope[i-1],p)}});
+  document.getElementById('total').textContent='ロープ距離: 水平 '+Math.round(d)+' m／斜距離 '+Math.round(s)+' m ('+rope.length+'点)';scene.requestRender()}
+const clickHandler=new Cesium.ScreenSpaceEventHandler(scene.canvas);
+clickHandler.setInputAction(e=>{if(!drawing)return;const ray=camera.getPickRay(e.position);const p=ray&&globe.pick(ray,scene);if(p){rope.push(p);updateRope()}},Cesium.ScreenSpaceEventType.LEFT_CLICK);
+document.getElementById('draw').onclick=()=>{drawing=!drawing;document.getElementById('draw').textContent=drawing?'描画終了':'ロープを描く';scene.canvas.style.cursor=drawing?'crosshair':''};
+document.getElementById('undo').onclick=()=>{rope.pop();updateRope()};
+document.getElementById('clear').onclick=()=>{rope=[];updateRope()};
+
+// ===== 地表追従カメラ =====
+// カメラが地表から300m以内に寄ると有効。カメラ直下の地表＋設定高さ(既定20m)を保ち、登りでは上げ、下りでは下げる。
+// ズームアウト操作で解除。地形が未読み込みの場所では前回の地表標高を使う。
+const FOLLOW_ON=300,hInput=document.getElementById('followH'),followOn=document.getElementById('followOn'),followEl=document.getElementById('follow');
+try{const v=localStorage.getItem('followH');if(v)hInput.value=v}catch(e){}
+hInput.onchange=()=>{const v=Math.max(2,Math.min(300,+hInput.value||20));hInput.value=v;try{localStorage.setItem('followH',v)}catch(e){};scene.requestRender()};
+followOn.onchange=()=>{followActive=false;scene.requestRender()};
+let followActive=false,followSuppressed=false,lastGround=null,lastInfo='';
+function releaseFollow(){if(followActive){followActive=false;followSuppressed=true}}
+function setCamHeight(carto,h){camera.setView({destination:Cesium.Cartesian3.fromRadians(carto.longitude,carto.latitude,h),orientation:{heading:camera.heading,pitch:camera.pitch,roll:0}})}
+scene.preRender.addEventListener(()=>{
+  const carto=camera.positionCartographic.clone();
+  // 範囲制限：カメラを北アルプスの範囲内・上限高度以下に保つ
+  const lon=Cesium.Math.toDegrees(carto.longitude),lat=Cesium.Math.toDegrees(carto.latitude);
+  const cl=Math.min(LIMIT.east,Math.max(LIMIT.west,lon)),ca=Math.min(LIMIT.north,Math.max(LIMIT.south,lat)),ch=Math.min(LIMIT.maxHeight,carto.height);
+  if(cl!==lon||ca!==lat||ch!==carto.height){carto.longitude=Cesium.Math.toRadians(cl);carto.latitude=Cesium.Math.toRadians(ca);setCamHeight(carto,ch);carto.height=ch}
+  const g=globe.getHeight(carto);if(g!==undefined)lastGround=g;
+  const above=lastGround==null?null:carto.height-lastGround;
+  if(above!=null&&above>FOLLOW_ON+100){followSuppressed=false;followActive=false}
+  if(followOn.checked&&!followActive&&!followSuppressed&&above!=null&&above<FOLLOW_ON){followActive=true}
+  if(followActive&&followOn.checked&&lastGround!=null){
+    const target=lastGround+(+hInput.value||20),k=carto.height<lastGround+2?0.6:0.25,next=carto.height+(target-carto.height)*k;
+    if(Math.abs(next-carto.height)>0.02){setCamHeight(carto,next);scene.requestRender()}}
+  const info=(followOn.checked?(followActive?'追従中':'地表から'+FOLLOW_ON+'m以内で追従'):'追従オフ')+(above!=null?'／地表から約'+Math.round(above)+'m':'');
+  if(info!==lastInfo){followEl.textContent=info;lastInfo=info}});
+scene.canvas.addEventListener('wheel',e=>{if(e.deltaY>0)releaseFollow()},{passive:true});
+
+// ===== 2本指ジェスチャー（Google Earth風）=====
+// 1回の操作ごとに「ズーム(広げる)・回転(ひねる)・傾き(2本で上下)」のどれか1つに判定して固定する。
+// 傾きは、地表近く(500m以内)ではその場で見上げ・見下ろし（空も見られる）、高い所では注視点の周りで傾ける。
+ssc.zoomEventTypes=[Cesium.CameraEventType.WHEEL,Cesium.CameraEventType.RIGHT_DRAG];
+ssc.tiltEventTypes=[Cesium.CameraEventType.MIDDLE_DRAG,{eventType:Cesium.CameraEventType.LEFT_DRAG,modifier:Cesium.KeyboardEventModifier.CTRL},{eventType:Cesium.CameraEventType.RIGHT_DRAG,modifier:Cesium.KeyboardEventModifier.CTRL}];
+(function earthGestures(){
+  const el=scene.canvas;let g=null;
+  const two=t=>{const r=el.getBoundingClientRect();return [0,1].map(i=>({x:t[i].clientX-r.left,y:t[i].clientY-r.top}))};
+  const geo=([a,b])=>({d:Math.hypot(b.x-a.x,b.y-a.y),ang:Math.atan2(b.y-a.y,b.x-a.x),c:{x:(a.x+b.x)/2,y:(a.y+b.y)/2}});
+  const pick=c=>{const ray=camera.getPickRay(new Cesium.Cartesian2(c.x,c.y));return (ray&&globe.pick(ray,scene))||camera.pickEllipsoid(new Cesium.Cartesian2(c.x,c.y))};
+  const nearGround=()=>{const c=camera.positionCartographic,h=globe.getHeight(c);return h!==undefined&&c.height-h<500};
+  function orbit(P,fn){camera.lookAtTransform(Cesium.Transforms.eastNorthUpToFixedFrame(P));fn();camera.lookAtTransform(Cesium.Matrix4.IDENTITY)}
+  el.addEventListener('touchstart',e=>{if(e.touches.length===2){const p=two(e.touches),q=geo(p);g={mode:null,start:p,sq:q,last:q,lastP:p,P:pick(q.c)}}else g=null},{passive:true});
+  el.addEventListener('touchmove',e=>{
+    if(!g||e.touches.length!==2)return;e.preventDefault();
+    const p=two(e.touches),q=geo(p);
+    if(!g.mode){
+      const scale=Math.log2(q.d/g.sq.d);let rot=(q.ang-g.sq.ang)*180/Math.PI;rot=((rot+540)%360)-180;
+      const dya=p[0].y-g.start[0].y,dyb=p[1].y-g.start[1].y,dx=(p[0].x-g.start[0].x+p[1].x-g.start[1].x)/2,dy=(dya+dyb)/2;
+      if(Math.abs(scale)>0.15)g.mode='zoom';else if(Math.abs(rot)>12)g.mode='rotate';
+      else if(dya*dyb>0&&Math.abs(dy)>18&&Math.abs(dy)>Math.abs(dx)*1.5&&Math.abs(scale)<0.08)g.mode=nearGround()?'look':'tilt';
+      else return;
+      g.last=q;g.lastP=p;g.P=pick(q.c)||g.P;return}
+    const P=g.P;
+    if(g.mode==='zoom'&&P){const ratio=q.d/g.last.d;if(ratio<1)releaseFollow();
+      const off=Cesium.Cartesian3.subtract(camera.position,P,new Cesium.Cartesian3());Cesium.Cartesian3.multiplyByScalar(off,1/ratio,off);
+      camera.setView({destination:Cesium.Cartesian3.add(P,off,new Cesium.Cartesian3()),orientation:{heading:camera.heading,pitch:camera.pitch,roll:0}})}
+    else if(g.mode==='rotate'){let da=q.ang-g.last.ang;if(da>Math.PI)da-=2*Math.PI;if(da<-Math.PI)da+=2*Math.PI;
+      if(P&&camera.pitch<-0.1)orbit(P,()=>camera.rotate(Cesium.Cartesian3.UNIT_Z,da));else camera.setView({orientation:{heading:camera.heading-da,pitch:camera.pitch,roll:0}})}  // 空を見ているときはその場で回す
+    else if(g.mode==='look'){const dy=q.c.y-g.last.c.y,np=Math.max(-Cesium.Math.PI_OVER_TWO+0.01,Math.min(Cesium.Math.toRadians(60),camera.pitch-dy*0.004));
+      camera.setView({orientation:{heading:camera.heading,pitch:np,roll:0}})}
+    else if(g.mode==='tilt'&&P){const dy=q.c.y-g.last.c.y;
+      orbit(P,()=>camera.rotateDown(dy*0.004));if(camera.pitch>-0.05)orbit(P,()=>camera.rotateDown(-dy*0.004))}  // 水平より上には回り込まない
+    g.last=q;g.lastP=p;scene.requestRender()},{passive:false});
+  const end=e=>{if(e.touches.length<2)g=null};
+  el.addEventListener('touchend',end,{passive:true});el.addEventListener('touchcancel',end,{passive:true});
+})();
+
+statusEl.textContent='表示中：国土地理院 航空写真＋標高(10m/5m)（冬季画像ではありません）';
+</script>
+</body>
+</html>
