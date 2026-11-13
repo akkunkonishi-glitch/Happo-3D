@@ -224,19 +224,26 @@ document.getElementById('top').onclick=()=>{releaseFollow();viewTop(1)};
 document.getElementById('oblique').onclick=()=>{releaseFollow();viewOblique(1)};
 
 // ===== 等高線：10m(細・薄)と50m(太)を地表の標高から描く =====
+// 等高線の見た目（数字を変えるだけで調整できます）。線は白、明るい地面で目立ちすぎないよう両側に薄い黒の縁取りを添える
+const CONTOUR_STYLE={
+  minorAlpha:0.25, minorWidth:1.0,   // 10m線：白の不透明度・線幅(px)
+  majorAlpha:0.5,  majorWidth:1.5,   // 50m線：白の不透明度・線幅(px)
+  haloAlpha:0.18,  haloWidth:0.75    // 縁取り：黒の不透明度・線の片側に足す幅(px)。縁取りが要らなければ haloAlpha:0
+};
 const contourMaterial=new Cesium.Material({fabric:{type:'HappoContour',
-  uniforms:{minorColor:new Cesium.Color(1,1,1,0.35),majorColor:new Cesium.Color(1,0.95,0.77,0.9),minorSpacing:10,majorSpacing:50,minorWidth:1.0,majorWidth:2.4},
-  source:`uniform vec4 minorColor;uniform vec4 majorColor;uniform float minorSpacing;uniform float majorSpacing;uniform float minorWidth;uniform float majorWidth;
+  uniforms:{minorColor:new Cesium.Color(1,1,1,CONTOUR_STYLE.minorAlpha),majorColor:new Cesium.Color(1,1,1,CONTOUR_STYLE.majorAlpha),haloColor:new Cesium.Color(0,0,0,CONTOUR_STYLE.haloAlpha),
+    minorSpacing:10,majorSpacing:50,minorWidth:CONTOUR_STYLE.minorWidth,majorWidth:CONTOUR_STYLE.majorWidth,haloWidth:CONTOUR_STYLE.haloWidth},
+  source:`uniform vec4 minorColor;uniform vec4 majorColor;uniform vec4 haloColor;uniform float minorSpacing;uniform float majorSpacing;uniform float minorWidth;uniform float majorWidth;uniform float haloWidth;
 czm_material czm_getMaterial(czm_materialInput materialInput){
   czm_material material=czm_getDefaultMaterial(materialInput);
   float h=materialInput.height;
-  float dF=max(abs(dFdx(h)),abs(dFdy(h)))*czm_pixelRatio;
+  float dF=max(abs(dFdx(h)),abs(dFdy(h)))*czm_pixelRatio;  // 1ピクセルあたりの標高差
   float dMin=mod(h,minorSpacing);dMin=min(dMin,minorSpacing-dMin);
   float dMaj=mod(h,majorSpacing);dMaj=min(dMaj,majorSpacing-dMaj);
   vec4 c=vec4(0.0);
-  bool minorOk=dF*minorWidth<minorSpacing*0.3, majorOk=dF*majorWidth<majorSpacing*0.3;  // 線が混みすぎる距離では出さない
-  if(minorOk&&dMin<dF*minorWidth*0.5)c=minorColor;
-  if(majorOk&&dMaj<dF*majorWidth*0.5)c=majorColor;
+  bool minorOk=dF*(minorWidth+2.0*haloWidth)<minorSpacing*0.3, majorOk=dF*(majorWidth+2.0*haloWidth)<majorSpacing*0.3;  // 線が混みすぎる距離では出さない
+  if(minorOk){if(dMin<dF*minorWidth*0.5)c=minorColor;else if(dMin<dF*(minorWidth*0.5+haloWidth))c=haloColor;}
+  if(majorOk){if(dMaj<dF*majorWidth*0.5)c=majorColor;else if(dMaj<dF*(majorWidth*0.5+haloWidth)&&c.a==0.0)c=haloColor;}
   vec4 o=czm_gammaCorrect(c);material.diffuse=o.rgb;material.alpha=o.a;return material;}`}});
 globe.material=contourMaterial;
 // 50mごとの数字：画面中心付近のDEM(10m)から50mの線をまたぐ地点を探して置く
