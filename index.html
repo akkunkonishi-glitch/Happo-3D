@@ -1,4 +1,4 @@
-<!doctype html><html lang="ja"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1"><title>八方尾根3D管理 試作</title><link href="https://unpkg.com/maplibre-gl@4.7.1/dist/maplibre-gl.css" rel="stylesheet"><style>html,body,#map{margin:0;width:100%;height:100%;font-family:system-ui}#panel{position:absolute;top:12px;left:12px;background:#ffffffee;padding:12px;border-radius:12px;max-width:260px;box-shadow:0 2px 12px #0003}button,select{padding:8px;margin:3px;border-radius:7px;border:1px solid #aaa;background:white}#status{font-size:12px;color:#444}#total{font-weight:bold}#map{background:#c5d7e4}</style></head><body><div id="map"></div><div id="panel"><b>八方尾根 3D 管理マップ</b><div id="status">地図ライブラリを読み込み中…</div><div><button id="tilt">3D表示</button><button id="flat">真上から</button></div><div><button id="draw">ロープを描く</button><button id="undo">1点戻す</button><button id="clear">消去</button></div><div id="total">ロープ距離: 0 m</div><small>赤線：指定KML範囲。地図上をタップしてロープの点を追加。距離は水平概算。</small></div><script src="https://unpkg.com/maplibre-gl@4.7.1/dist/maplibre-gl.js"></script><script>
+<!doctype html><html lang="ja"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1"><title>八方尾根3D管理 試作</title><link href="https://unpkg.com/maplibre-gl@4.7.1/dist/maplibre-gl.css" rel="stylesheet"><style>html,body,#map{margin:0;width:100%;height:100%;font-family:system-ui}#panel{position:absolute;top:12px;left:12px;background:#ffffffee;padding:12px;border-radius:12px;max-width:260px;box-shadow:0 2px 12px #0003}button,select{padding:8px;margin:3px;border-radius:7px;border:1px solid #aaa;background:white}#status{font-size:12px;color:#444}#total{font-weight:bold}#map{background:#c5d7e4}</style></head><body><div id="map"></div><div id="panel"><b>八方尾根 3D 管理マップ</b><div id="status">地図ライブラリを読み込み中…</div><div><button id="tilt">3D表示</button><button id="flat">真上から</button><button id="contour">等高線 ON</button></div><div><button id="draw">ロープを描く</button><button id="undo">1点戻す</button><button id="clear">消去</button></div><div id="total">ロープ距離: 0 m</div><small>赤線：指定KML範囲。地図上をタップしてロープの点を追加。距離は水平概算。</small></div><script src="https://unpkg.com/maplibre-gl@4.7.1/dist/maplibre-gl.js"></script><script src="https://unpkg.com/maplibre-contour@0.1.0/dist/index.min.js"></script><script>
 const boundary=[[137.79031276702884, 36.71360253057494], [137.79031276702884, 36.71360253057494], [137.78507709503177, 36.709955790915565], [137.78507709503177, 36.709955790915565], [137.78447628021243, 36.705345513841785], [137.78447628021243, 36.705345513841785], [137.7805280685425, 36.68999886813347], [137.7805280685425, 36.68999886813347], [137.7827596664429, 36.685456224030055], [137.7827596664429, 36.685456224030055], [137.80009746551517, 36.673065830877334], [137.80009746551517, 36.673065830877334], [137.8038311004639, 36.67110383562481], [137.8038311004639, 36.67110383562481], [137.808895111084, 36.67351329647276], [137.808895111084, 36.67351329647276], [137.81473159790042, 36.68012171607383], [137.81473159790042, 36.68012171607383], [137.82494544982913, 36.68397636535661], [137.82494544982913, 36.68397636535661], [137.84365653991702, 36.69608971975234], [137.84365653991702, 36.69608971975234], [137.84760475158694, 36.69963389154272], [137.84760475158694, 36.69963389154272], [137.8463172912598, 36.709061281169646], [137.8463172912598, 36.709061281169646], [137.8379058837891, 36.71525382744859], [137.8379058837891, 36.71525382744859], [137.82709121704104, 36.721273880045004], [137.82709121704104, 36.721273880045004], [137.8239154815674, 36.72086109150479], [137.8239154815674, 36.72086109150479], [137.8115558624268, 36.71604506128931], [137.8115558624268, 36.71604506128931], [137.80554771423343, 36.715150622433804], [137.80554771423343, 36.715150622433804], [137.7917289733887, 36.713912151442244], [137.7917289733887, 36.713912151442244]];
 const center=[(Math.min(...boundary.map(p=>p[0]))+Math.max(...boundary.map(p=>p[0])))/2,(Math.min(...boundary.map(p=>p[1]))+Math.max(...boundary.map(p=>p[1])))/2];
 const status=document.getElementById('status');let drawing=false,rope=[];
@@ -11,7 +11,7 @@ maplibregl.setMaxParallelImageRequests(6);
 // 国土地理院 標高PNGタイル：h=(R*65536+G*256+B)/100、x=0x800000は無効値、x>0x800000は負値。
 // ズーム14以下=10m(dem_png)、ズーム15=5m(dem5a_png)。5mの無効値・欠けは10m(親タイル)の値を補間して埋め、それも無ければ周囲の値→0。
 // ブラウザの色補正で値が狂わないよう、PNGは自前で解凍して画素値を直接読む。Terrarium形式で渡す。
-async function buildGsiDem(z,x,y,signal){
+async function buildGsiDem(z,x,y,signal,raw){
   const GSI='https://cyberjapandata.gsi.go.jp/xyz/';
   async function heights(layer,lz,lx,ly,sig){
     const r=await fetch(GSI+layer+'/'+lz+'/'+lx+'/'+ly+'.png',{signal:sig});if(!r.ok)return null;
@@ -57,27 +57,64 @@ async function buildGsiDem(z,x,y,signal){
           const fx=Math.min(255,Math.max(0,ox+(col+0.5)/2-0.5)),fy=Math.min(255,Math.max(0,oy+(row+0.5)/2-0.5)),x0=Math.floor(fx),y0=Math.floor(fy),x1=Math.min(255,x0+1),y1=Math.min(255,y0+1),tx=fx-x0,ty=fy-y0;
           h[k]=(P[y0*256+x0]*(1-tx)+P[y0*256+x1]*tx)*(1-ty)+(P[y1*256+x0]*(1-tx)+P[y1*256+x1]*tx)*ty}}
       fill(h)}}
+  if(raw)return h;
   const img=new ImageData(256,256),d=img.data;
   for(let k=0;k<65536;k++){const v=Math.max(-32768,Math.min(32767,h[k]))+32768,fl=Math.floor(v);
     d[k*4]=fl>>8;d[k*4+1]=fl&255;d[k*4+2]=Math.floor((v-fl)*256);d[k*4+3]=255}
   return createImageBitmap(img,{premultiplyAlpha:'none',colorSpaceConversion:'none'})}
 let demWorker=null,demSeq=0;const demPending=new Map();
 try{if(typeof DecompressionStream!=='undefined'){
-  const src=buildGsiDem.toString()+";const ctrls=new Map();self.onmessage=async e=>{const m=e.data;if(m.cancel){const c=ctrls.get(m.cancel);if(c)c.abort();return}const ac=new AbortController();ctrls.set(m.id,ac);try{const b=await buildGsiDem(m.z,m.x,m.y,ac.signal);self.postMessage({id:m.id,bitmap:b},[b])}catch(err){self.postMessage({id:m.id,missing:err.message==='missing',aborted:err.name==='AbortError',err:String(err)})}finally{ctrls.delete(m.id)}};";
+  const src=buildGsiDem.toString()+";const ctrls=new Map();self.onmessage=async e=>{const m=e.data;if(m.cancel){const c=ctrls.get(m.cancel);if(c)c.abort();return}const ac=new AbortController();ctrls.set(m.id,ac);try{const r=await buildGsiDem(m.z,m.x,m.y,ac.signal,m.raw);if(m.raw)self.postMessage({id:m.id,heights:r},[r.buffer]);else self.postMessage({id:m.id,bitmap:r},[r])}catch(err){self.postMessage({id:m.id,missing:err.message==='missing',aborted:err.name==='AbortError',err:String(err)})}finally{ctrls.delete(m.id)}};";
   demWorker=new Worker(URL.createObjectURL(new Blob([src],{type:'text/javascript'})));
-  demWorker.onmessage=e=>{const p=demPending.get(e.data.id);if(!p)return;demPending.delete(e.data.id);e.data.bitmap?p.res(e.data.bitmap):p.rej(e.data)};
+  demWorker.onmessage=e=>{const p=demPending.get(e.data.id);if(!p)return;demPending.delete(e.data.id);(e.data.bitmap||e.data.heights)?p.res(e.data.bitmap||e.data.heights):p.rej(e.data)};
   demWorker.onerror=()=>{demWorker=null;for(const p of demPending.values())p.rej({});demPending.clear()}}}catch(e){demWorker=null}
-// 表示範囲から外れて不要になったタイルは読み込みを中止する
+// 標高タイルを別スレッドで作る。表示範囲から外れて不要になったタイルは読み込みを中止する
+function demCall(z,x,y,signal,raw){
+  if(!demWorker)return buildGsiDem(z,x,y,signal,raw);
+  const id=++demSeq,onAbort=()=>{if(demWorker)demWorker.postMessage({cancel:id})};signal.addEventListener('abort',onAbort);
+  return new Promise((res,rej)=>{demPending.set(id,{res,rej});demWorker.postMessage({id,z,x,y,raw})})
+    .catch(e=>{if(signal.aborted||(e&&e.aborted))throw new DOMException('aborted','AbortError');if(e&&e.missing)throw new Error('標高タイルなし '+z+'/'+x+'/'+y);return buildGsiDem(z,x,y,signal,raw)})
+    .finally(()=>signal.removeEventListener('abort',onAbort))}
 maplibregl.addProtocol('gsidem',async(params,abort)=>{
-  const [z,x,y]=params.url.replace('gsidem://','').split('/').map(Number);let bmp;
-  if(demWorker){const id=++demSeq;const onAbort=()=>{if(demWorker)demWorker.postMessage({cancel:id})};abort.signal.addEventListener('abort',onAbort);
-    try{bmp=await new Promise((res,rej)=>{demPending.set(id,{res,rej});demWorker.postMessage({id,z,x,y})})}
-    catch(e){if(abort.signal.aborted||(e&&e.aborted))throw new DOMException('aborted','AbortError');if(e&&e.missing)throw new Error('標高タイルなし '+z+'/'+x+'/'+y);bmp=await buildGsiDem(z,x,y,abort.signal)}
-    finally{abort.signal.removeEventListener('abort',onAbort)}}
-  else bmp=await buildGsiDem(z,x,y,abort.signal);
-  return {data:bmp}});
-const map=new maplibregl.Map({container:'map',center,zoom:12,minZoom:9,maxBounds:viewBounds,maxPitch:85,pitch:65,bearing:-15,style:{version:8,sources:{photo:{type:'raster',tiles:['https://cyberjapandata.gsi.go.jp/xyz/seamlessphoto/{z}/{x}/{y}.jpg'],tileSize:256,minzoom:2,maxzoom:18,bounds:tileBounds,attribution:'国土地理院（シームレス空中写真・数値標高モデル）'},dem:{type:'raster-dem',tiles:['gsidem://{z}/{x}/{y}'],tileSize:256,encoding:'terrarium',minzoom:1,maxzoom:15,bounds:tileBounds},demLow:{type:'raster-dem',tiles:['gsidem://{z}/{x}/{y}'],tileSize:256,encoding:'terrarium',minzoom:1,maxzoom:11,bounds:tileBounds}},layers:[{id:'photo',type:'raster',source:'photo'}],terrain:{source:'dem',exaggeration:1}}});
+  const [z,x,y]=params.url.replace('gsidem://','').split('/').map(Number);
+  return {data:await demCall(z,x,y,abort.signal,false)}});
+// 等高線(maplibre-contour)：地形と同じ地理院10m DEMから生成。10m間隔(細・薄)、50m(太)、数字は50mごと。
+let contourUrl=null;
+if(window.mlcontour){try{
+  const demSource=new mlcontour.DemSource({url:'gsi10/{z}/{x}/{y}',encoding:'terrarium',maxzoom:14,worker:false});
+  demSource.manager=new mlcontour.LocalDemManager({demUrlPattern:'gsi10/{z}/{x}/{y}',cacheSize:64,encoding:'terrarium',maxzoom:14,timeoutMs:20000,
+    getTile:async url=>({data:new Blob([url])}),
+    decodeImage:async(blob,enc,abort)=>{const [z,x,y]=(await blob.text()).split('/').slice(1).map(Number);return {width:256,height:256,data:await demCall(z,x,y,abort.signal,true)}}});
+  demSource.setupMaplibre(maplibregl);
+  // キャッシュした等高線データをMapLibreに渡すと使用済みになるため、毎回コピーを渡す
+  maplibregl.addProtocol(demSource.contourProtocolId,async(params,abort)=>{const r=await demSource.contourProtocolV4(params,abort);return {...r,data:r.data.slice(0)}});
+  contourUrl=demSource.contourProtocolUrl({thresholds:{11:[100,500],12:[50,250],13:[20,100],14:[10,50]},elevationKey:'ele',levelKey:'level',contourLayer:'contours',overzoom:1,buffer:1});
+}catch(e){contourUrl=null}}
+const map=new maplibregl.Map({container:'map',center,zoom:12,minZoom:9,maxBounds:viewBounds,maxPitch:85,pitch:65,bearing:-15,style:{version:8,glyphs:'https://demotiles.maplibre.org/font/{fontstack}/{range}.pbf',sources:{...(contourUrl?{contours:{type:'vector',tiles:[contourUrl],minzoom:11,maxzoom:15}}:{}),photo:{type:'raster',tiles:['https://cyberjapandata.gsi.go.jp/xyz/seamlessphoto/{z}/{x}/{y}.jpg'],tileSize:256,minzoom:2,maxzoom:18,bounds:tileBounds,attribution:'国土地理院（シームレス空中写真・数値標高モデル）'},dem:{type:'raster-dem',tiles:['gsidem://{z}/{x}/{y}'],tileSize:256,encoding:'terrarium',minzoom:1,maxzoom:15,bounds:tileBounds},demLow:{type:'raster-dem',tiles:['gsidem://{z}/{x}/{y}'],tileSize:256,encoding:'terrarium',minzoom:1,maxzoom:11,bounds:tileBounds}},layers:[{id:'photo',type:'raster',source:'photo'},...(contourUrl?[{id:'contour-minor',type:'line',source:'contours','source-layer':'contours',filter:['==',['get','level'],0],paint:{'line-color':'#ffffff','line-opacity':0.35,'line-width':0.6}},{id:'contour-major',type:'line',source:'contours','source-layer':'contours',filter:['>',['get','level'],0],paint:{'line-color':'#fff2c4','line-opacity':0.85,'line-width':1.6}},{id:'contour-label',type:'symbol',source:'contours','source-layer':'contours',filter:['>',['get','level'],0],layout:{'symbol-placement':'line','text-field':['concat',['to-string',['get','ele']],'m'],'text-font':['Open Sans Semibold'],'text-size':11},paint:{'text-color':'#ffffff','text-halo-color':'rgba(0,0,0,0.7)','text-halo-width':1.2}}]:[])],terrain:{source:'dem',exaggeration:1}}});
 map.addControl(new maplibregl.NavigationControl(),'bottom-right');
+(function earthGestures(){
+  map.touchZoomRotate.disable();map.touchPitch.disable();
+  const el=map.getCanvasContainer();let g=null;
+  const two=t=>{const r=el.getBoundingClientRect();return [0,1].map(i=>({x:t[i].clientX-r.left,y:t[i].clientY-r.top}))};
+  const geo=([a,b])=>({d:Math.hypot(b.x-a.x,b.y-a.y),ang:Math.atan2(b.y-a.y,b.x-a.x)*180/Math.PI,c:{x:(a.x+b.x)/2,y:(a.y+b.y)/2}});
+  const base=p=>{const q=geo(p);return {p,...q,zoom:map.getZoom(),bearing:map.getBearing(),pitch:map.getPitch(),around:map.unproject([q.c.x,q.c.y])}};
+  el.addEventListener('touchstart',e=>{if(e.touches.length===2){g={mode:null,...base(two(e.touches))};map.dragPan.disable()}else if(e.touches.length>2)g=null},{passive:true});
+  el.addEventListener('touchmove',e=>{
+    if(!g||e.touches.length!==2)return;e.preventDefault();
+    const p=two(e.touches),q=geo(p),scale=Math.log2(q.d/g.d);let rot=q.ang-g.ang;rot=((rot+540)%360)-180;
+    const dya=p[0].y-g.p[0].y,dyb=p[1].y-g.p[1].y,dx=(p[0].x-g.p[0].x+p[1].x-g.p[1].x)/2,dy=(dya+dyb)/2;
+    if(!g.mode){
+      if(Math.abs(scale)>0.15)g.mode='zoom';
+      else if(Math.abs(rot)>12)g.mode='rotate';
+      else if(dya*dyb>0&&Math.abs(dy)>18&&Math.abs(dy)>Math.abs(dx)*1.5&&Math.abs(scale)<0.08)g.mode='pitch';
+      else return;
+      const m=g.mode;g=base(p);g.mode=m;return}
+    if(g.mode==='zoom')map.easeTo({zoom:g.zoom+scale,around:g.around,duration:0});
+    else if(g.mode==='rotate')map.easeTo({bearing:g.bearing-rot,around:g.around,duration:0});
+    else map.setPitch(Math.max(0,Math.min(85,g.pitch-dy*0.4)))},{passive:false});
+  const end=e=>{if(e.touches.length<2&&g){g=null;map.dragPan.enable()}};
+  el.addEventListener('touchend',end,{passive:true});el.addEventListener('touchcancel',end,{passive:true});
+})();
 const syncDem=()=>{const want=map.getZoom()<11?'demLow':'dem';const t=map.getTerrain();if(!t||t.source!==want)map.setTerrain({source:want,exaggeration:1})};map.on('zoomend',syncDem);map.once('load',syncDem);
 function feature(points,kind){return {type:'Feature',geometry:{type:kind,coordinates:points},properties:{}}}
 const boundaryGeo={type:'FeatureCollection',features:[feature([...boundary,boundary[0]],'LineString')]};
@@ -92,6 +129,7 @@ map.on('click',e=>{if(drawing){rope.push([e.lngLat.lng,e.lngLat.lat]);update()}}
 document.getElementById('draw').onclick=()=>{drawing=!drawing;document.getElementById('draw').textContent=drawing?'描画終了':'ロープを描く';map.getCanvas().style.cursor=drawing?'crosshair':''};
 document.getElementById('undo').onclick=()=>{rope.pop();update()};
 document.getElementById('clear').onclick=()=>{rope=[];update()};
+let contourOn=true;document.getElementById('contour').onclick=()=>{contourOn=!contourOn;for(const id of ['contour-minor','contour-major','contour-label'])if(map.getLayer(id))map.setLayoutProperty(id,'visibility',contourOn?'visible':'none');document.getElementById('contour').textContent=contourOn?'等高線 ON':'等高線 OFF'};
 document.getElementById('tilt').onclick=()=>map.easeTo({pitch:65,duration:500});
 document.getElementById('flat').onclick=()=>map.easeTo({pitch:0,bearing:0,duration:500});
 }
