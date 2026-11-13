@@ -22,3 +22,13 @@
 2. パネルの「GeoJSON保存」で `happo-courses.geojson` をダウンロード。
 3. GitHub のリポジトリで `cesium/data/` に「Add file → Upload files」でアップロード（または Claude に渡す）。
 4. 以後はこのファイルが優先して読まれます。OSM を更新したいときは「OSM再取得」→ 再度保存・アップロード。
+
+### コース編集モード
+
+`https://akkunkonishi-glitch.github.io/Happo-3D/cesium/?edit=1` で開くと編集モードになります。
+
+- ミニマップでコースをタップ → 選択（頂点が表示される）
+- 頂点をドラッグ → 移動／辺をタップ → 頂点を追加／頂点を長押し（赤くなったら離す）→ 削除
+- 変更はすぐ3Dに反映され、端末（localStorage）に自動保存。編集したデータは通常モードでもその端末で表示されます
+- 「GeoJSONを書き出す」でクリップボードにコピー。リポジトリの `cesium/data/happo-courses.geojson` として保存すると全員に反映されます
+- 「編集を破棄」で元のデータに戻します

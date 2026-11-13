@@ -82,10 +82,12 @@ const SETTINGS={
   resetHeight:20,    // 「ゲレンデ向き」ボタンでの地表からの高さ(m)。nullにすると今の高さのまま
   minimapZoom:15,    // ミニマップの既定の縮尺(ズーム。大きいほど拡大)
   minimapSize:200,   // ミニマップの大きさ(px)
+  minimapSizeEdit:320,// コース編集モード(?edit=1)でのミニマップの大きさ(px)
   stickYawSpeed:60,  // 視点スティック：左右に回る速さ(度/秒、倒し量に関係なく一定)
   stickPitchSpeed:40 // 視点スティック：見上げ・見下ろしの速さ(度/秒)
 };
 
+const EDIT=new URLSearchParams(location.search).get('edit')==='1';  // URLに ?edit=1 を付けたときだけコース編集モード
 // ===== 国土地理院DEM（PNG標高タイル）=====
 // h=(R*65536+G*256+B)/100、x=0x800000は無効値、x>0x800000は負値。ズーム14以下=10m(dem_png)、ズーム15=5m(dem5a_png)。
 // 5mの無効値・欠けは10mの値を補間して埋め、それも無ければ周囲の値→0。PNGは自前で解凍し、ブラウザの色補正の影響を受けない。
@@ -361,7 +363,7 @@ ssc.rotateEventTypes=[];ssc.inertiaSpin=0;ssc.inertiaTranslate=0;ssc.inertiaZoom
 // 国土地理院の標準地図(等高線入り)。中心＝カメラの真下で固定、上方向＝カメラの方位。中央の扇がカメラの視線方向。
 // ドラッグでカメラを水平移動(高さは地表＋設定値)、ピンチで縮尺変更。左上の矢印が北。
 const mini=(()=>{
-  const S=SETTINGS.minimapSize,cv=document.getElementById('miniCanvas'),dpr=Math.min(2,window.devicePixelRatio||1);
+  const S=EDIT?SETTINGS.minimapSizeEdit:SETTINGS.minimapSize,cv=document.getElementById('miniCanvas'),dpr=Math.min(2,window.devicePixelRatio||1);
   cv.width=S*dpr;cv.height=S*dpr;cv.style.width=cv.style.height=S+'px';
   const ctx=cv.getContext('2d'),tiles=new Map();let zoom=SETTINGS.minimapZoom,pending=false;
   const toWorld=(lon,lat,z)=>{const n=256*2**z,r=lat*Math.PI/180;return [(lon+180)/360*n,(1-Math.log(Math.tan(r)+1/Math.cos(r))/Math.PI)/2*n]};
@@ -369,6 +371,10 @@ const mini=(()=>{
   function tile(z,x,y){const k=z+'/'+x+'/'+y;let t=tiles.get(k);
     if(!t){t=new Image();t.crossOrigin='anonymous';t.onload=request;t.src='https://cyberjapandata.gsi.go.jp/xyz/std/'+k+'.png';tiles.set(k,t);if(tiles.size>160)tiles.delete(tiles.keys().next().value)}
     return t.complete&&t.naturalWidth?t:null}
+  const hooks={};  // コース編集などが描画(draw)・操作(down/move/up/tap/cancel)を差し込む
+  function view(){const c=camera.positionCartographic,zi=Math.max(5,Math.min(18,Math.floor(zoom)));return {lon:Cesium.Math.toDegrees(c.longitude),lat:Cesium.Math.toDegrees(c.latitude),hd:camera.heading,zi,sc:2**(zoom-zi)}}
+  function proj(lon,lat,v=view()){const [cx,cy]=toWorld(v.lon,v.lat,v.zi),[px,py]=toWorld(lon,lat,v.zi),dx=(px-cx)*v.sc,dy=(py-cy)*v.sc,c=Math.cos(-v.hd),s=Math.sin(-v.hd);return [S/2+dx*c-dy*s,S/2+dx*s+dy*c]}
+  function unproj(x,y,v=view()){const dx=x-S/2,dy=y-S/2,c=Math.cos(v.hd),s=Math.sin(v.hd),[cx,cy]=toWorld(v.lon,v.lat,v.zi);return fromWorld(cx+(dx*c-dy*s)/v.sc,cy+(dx*s+dy*c)/v.sc,v.zi)}
   function draw(){pending=false;
     const c=camera.positionCartographic,lon=Cesium.Math.toDegrees(c.longitude),lat=Cesium.Math.toDegrees(c.latitude),hd=camera.heading;
     const zi=Math.max(5,Math.min(18,Math.floor(zoom))),sc=2**(zoom-zi),[wx,wy]=toWorld(lon,lat,zi);
@@ -380,6 +386,7 @@ const mini=(()=>{
     line([...boundary,boundary[0]],'#f44336',2.5);
     for(const r of ropeState.ropes)line(r.pts,r.color,r.id===ropeState.selected?4:2.5);
     ctx.restore();
+    if(hooks.draw){const v=view();hooks.draw(ctx,(lon,lat)=>proj(lon,lat,v))}
     // 視線方向の扇（画面上＝カメラの向き）
     const fr=camera.frustum,fovx=fr.aspectRatio>=1?fr.fov:2*Math.atan(Math.tan(fr.fov/2)*fr.aspectRatio),r=S*0.36;
     ctx.beginPath();ctx.moveTo(S/2,S/2);ctx.arc(S/2,S/2,r,-Math.PI/2-fovx/2,-Math.PI/2+fovx/2);ctx.closePath();
@@ -392,10 +399,15 @@ const mini=(()=>{
   function request(){if(!pending){pending=true;requestAnimationFrame(draw)}}
   scene.postRender.addEventListener(()=>draw());  // 本体の描画と同じフレームで描く（遅延なし）
   // 操作：1本指ドラッグ＝カメラ水平移動（地図は指と一緒に動く）、2本指ピンチ＝縮尺
-  const ptrs=new Map();let pinch0=null;
-  cv.addEventListener('pointerdown',e=>{cv.setPointerCapture(e.pointerId);ptrs.set(e.pointerId,{x:e.clientX,y:e.clientY});pinch0=null;e.preventDefault()});
+  const ptrs=new Map();let pinch0=null,consumed=null,down=null;
+  const loc=e=>{const r=cv.getBoundingClientRect();return [e.clientX-r.left,e.clientY-r.top]};
+  cv.addEventListener('pointerdown',e=>{cv.setPointerCapture(e.pointerId);ptrs.set(e.pointerId,{x:e.clientX,y:e.clientY});pinch0=null;e.preventDefault();
+    if(ptrs.size===1){const [x,y]=loc(e);down={id:e.pointerId,x:e.clientX,y:e.clientY,t:e.timeStamp,moved:false};consumed=(hooks.down&&hooks.down(x,y,e.timeStamp))?e.pointerId:null}
+    else{if(consumed!==null&&hooks.cancel)hooks.cancel();consumed=null;down=null}});
   cv.addEventListener('pointermove',e=>{const prev=ptrs.get(e.pointerId);if(!prev)return;e.preventDefault();
     const cur={x:e.clientX,y:e.clientY};ptrs.set(e.pointerId,cur);
+    if(down&&down.id===e.pointerId&&Math.hypot(cur.x-down.x,cur.y-down.y)>6)down.moved=true;
+    if(consumed===e.pointerId){const [x,y]=loc(e);hooks.move&&hooks.move(x,y);return}
     if(ptrs.size===1){const sx=cur.x-prev.x,sy=cur.y-prev.y,hd=camera.heading,zi=Math.max(5,Math.min(18,Math.floor(zoom))),sc=2**(zoom-zi);
       const dx=-(sx*Math.cos(hd)-sy*Math.sin(hd))/sc,dy=-(sx*Math.sin(hd)+sy*Math.cos(hd))/sc;
       const c=camera.positionCartographic,[wx,wy]=toWorld(Cesium.Math.toDegrees(c.longitude),Cesium.Math.toDegrees(c.latitude),zi);
@@ -406,10 +418,13 @@ const mini=(()=>{
       scene.requestRender()}
     else if(ptrs.size===2){const [a,b]=[...ptrs.values()],d=Math.hypot(a.x-b.x,a.y-b.y);
       if(pinch0){zoom=Math.max(10,Math.min(18.5,zoom+Math.log2(d/pinch0)))}pinch0=d;request()}});
-  const up=e=>{ptrs.delete(e.pointerId);pinch0=null};
+  const up=e=>{const [x,y]=loc(e);
+    if(consumed===e.pointerId){hooks.up&&hooks.up(x,y,e.timeStamp,e.type==='pointercancel');consumed=null}
+    else if(e.type==='pointerup'&&down&&down.id===e.pointerId&&!down.moved&&e.timeStamp-down.t<500&&hooks.tap)hooks.tap(x,y);  // 描画が重くても指の実際の時刻で判定
+    if(down&&down.id===e.pointerId)down=null;ptrs.delete(e.pointerId);pinch0=null};
   cv.addEventListener('pointerup',up);cv.addEventListener('pointercancel',up);
   cv.addEventListener('wheel',e=>{e.preventDefault();zoom=Math.max(10,Math.min(18.5,zoom-e.deltaY*0.002));request()},{passive:false});
-  return {request,setZoom:z=>{zoom=z;request()},get zoom(){return zoom}};
+  return {request,hooks,proj:(lon,lat)=>proj(lon,lat),unproj:(x,y)=>unproj(x,y),setZoom:z=>{zoom=z;request()},get zoom(){return zoom}};
 })();
 // ===== 地表からの高さスライダー（右端・2〜100m・対数で低い側が細かい）=====
 // ドラッグ中はリアルタイムでカメラ高度(地表＋値)に反映する。
@@ -434,7 +449,7 @@ const mini=(()=>{
 // 読み込み順：①リポジトリの data/happo-courses.geojson → ②端末に保存した前回の取得結果 → ③ブラウザからOverpass APIで取得。
 // コースは難易度に関係なく一色（薄い水色の半透明）で地形に貼り、縁を濃い線で囲む。中心線だけのコースは幅の帯にする。
 // リフトは白い線＋名前ラベル。「GeoJSON保存」で取得結果をファイルに書き出せる（リポジトリの cesium/data/ に置くと次から①で読む）。
-const COURSE={fill:'#8cecff',edge:'#0090b0',defaultWidth:30,bbox:[36.655,137.76,36.735,137.87],cacheKey:'happoCoursesGeo',
+const COURSE={fill:'#8cecff',edge:'#0090b0',defaultWidth:30,bbox:[36.655,137.76,36.735,137.87],cacheKey:'happoCoursesGeo',editKey:'happoCoursesEdited',
   overpass:['https://overpass-api.de/api/interpreter','https://overpass.kumi.systems/api/interpreter','https://overpass.private.coffee/api/interpreter']};
 try{viewer.creditDisplay.addStaticCredit(new Cesium.Credit('コース・リフト © OpenStreetMap contributors'))}catch(e){}
 const courseSrc=new Cesium.CustomDataSource('courses');viewer.dataSources.add(courseSrc);
@@ -467,26 +482,34 @@ async function fetchOverpass(){
 function offsetLine(c,dist){ // 中心線を左右にずらした線（メートル）。帯の縁を描くのに使う
   const out=[];for(let i=0;i<c.length;i++){const p=c[Math.max(0,i-1)],q=c[Math.min(c.length-1,i+1)],kx=Math.cos(c[i][1]*Math.PI/180)*111320,ky=110540;
     let dx=(q[0]-p[0])*kx,dy=(q[1]-p[1])*ky;const L=Math.hypot(dx,dy)||1;dx/=L;dy/=L;out.push([c[i][0]-dy*dist/kx,c[i][1]+dx*dist/ky])}return out}
+const featEnts=new Map();let editSel=null;  // コース(feature)ごとの3Dエンティティ／編集中に選択しているコース
+function addCourseFeature(ft){
+  const k=ft.properties.kind,g=ft.geometry,out=[],add=o=>{out.push(courseSrc.entities.add(o))},deg=c=>Cesium.Cartesian3.fromDegreesArray(c.flat());
+  const sel=ft===editSel,edgeMat=sel?Cesium.Color.fromCssColorString('#ff6d00'):courseEdgeMat,edgeW=sel?3:2;
+  if(k==='piste-area'){const polys=g.type==='Polygon'?[g.coordinates]:g.coordinates;
+    for(const pg of polys){add({polygon:{hierarchy:new Cesium.PolygonHierarchy(deg(pg[0]),pg.slice(1).map(h=>new Cesium.PolygonHierarchy(deg(h)))),material:courseFillMat,classificationType:Cesium.ClassificationType.TERRAIN}});
+      for(const ring of pg)add({polyline:{positions:deg(ring),width:edgeW,material:edgeMat,clampToGround:true}})}}
+  else if(k==='piste-line'&&g.coordinates.length>=2){const w=ft.properties.width||COURSE.defaultWidth;
+    add({corridor:{positions:deg(g.coordinates),width:w,material:courseFillMat,classificationType:Cesium.ClassificationType.TERRAIN,cornerType:Cesium.CornerType.ROUNDED}});
+    for(const side of [w/2,-w/2])add({polyline:{positions:deg(offsetLine(g.coordinates,side)),width:edgeW,material:edgeMat,clampToGround:true}})}
+  else if(k==='lift'&&g.coordinates.length>=2){const c=g.coordinates,mid=c[Math.floor(c.length/2)];
+    add({polyline:{positions:deg(c),width:3,material:new Cesium.PolylineOutlineMaterialProperty({color:Cesium.Color.WHITE,outlineColor:Cesium.Color.fromCssColorString('#333'),outlineWidth:1}),clampToGround:true}});
+    if(ft.properties.name)add({position:Cesium.Cartesian3.fromDegrees(mid[0],mid[1]),label:{text:ft.properties.name,font:'bold 13px sans-serif',fillColor:Cesium.Color.WHITE,outlineColor:Cesium.Color.BLACK,outlineWidth:3,style:Cesium.LabelStyle.FILL_AND_OUTLINE,heightReference:Cesium.HeightReference.CLAMP_TO_GROUND,pixelOffset:new Cesium.Cartesian2(0,-14),disableDepthTestDistance:Number.POSITIVE_INFINITY,distanceDisplayCondition:new Cesium.DistanceDisplayCondition(0,9000)}})}
+  featEnts.set(ft,out)}
+function redrawFeature(ft){if(!ft)return;for(const e of featEnts.get(ft)||[])courseSrc.entities.remove(e);addCourseFeature(ft);scene.requestRender()}
 function drawCourses(){
-  courseSrc.entities.suspendEvents();courseSrc.entities.removeAll();const f=courseGeo?courseGeo.features:[];let nA=0,nL=0,nLift=0;
-  const deg=c=>Cesium.Cartesian3.fromDegreesArray(c.flat());
-  for(const ft of f){const k=ft.properties.kind,g=ft.geometry;
-    if(k==='piste-area'){const polys=g.type==='Polygon'?[g.coordinates]:g.coordinates;
-      for(const pg of polys){nA++;courseSrc.entities.add({polygon:{hierarchy:new Cesium.PolygonHierarchy(deg(pg[0]),pg.slice(1).map(h=>new Cesium.PolygonHierarchy(deg(h)))),material:courseFillMat,classificationType:Cesium.ClassificationType.TERRAIN}});
-        for(const ring of pg)courseSrc.entities.add({polyline:{positions:deg(ring),width:2,material:courseEdgeMat,clampToGround:true}})}}
-    else if(k==='piste-line'&&g.coordinates.length>=2){nL++;const w=ft.properties.width||COURSE.defaultWidth;
-      courseSrc.entities.add({corridor:{positions:deg(g.coordinates),width:w,material:courseFillMat,classificationType:Cesium.ClassificationType.TERRAIN,cornerType:Cesium.CornerType.ROUNDED}});
-      for(const side of [w/2,-w/2])courseSrc.entities.add({polyline:{positions:deg(offsetLine(g.coordinates,side)),width:2,material:courseEdgeMat,clampToGround:true}})}
-    else if(k==='lift'&&g.coordinates.length>=2){nLift++;const c=g.coordinates,mid=c[Math.floor(c.length/2)];
-      courseSrc.entities.add({polyline:{positions:deg(c),width:3,material:new Cesium.PolylineOutlineMaterialProperty({color:Cesium.Color.WHITE,outlineColor:Cesium.Color.fromCssColorString('#333'),outlineWidth:1}),clampToGround:true}});
-      if(ft.properties.name)courseSrc.entities.add({position:Cesium.Cartesian3.fromDegrees(mid[0],mid[1]),label:{text:ft.properties.name,font:'bold 13px sans-serif',fillColor:Cesium.Color.WHITE,outlineColor:Cesium.Color.BLACK,outlineWidth:3,style:Cesium.LabelStyle.FILL_AND_OUTLINE,heightReference:Cesium.HeightReference.CLAMP_TO_GROUND,pixelOffset:new Cesium.Cartesian2(0,-14),disableDepthTestDistance:Number.POSITIVE_INFINITY,distanceDisplayCondition:new Cesium.DistanceDisplayCondition(0,9000)}})}}
-  courseSrc.entities.resumeEvents();courseSrc.show=document.getElementById('courseOn').checked;scene.requestRender();
+  courseSrc.entities.suspendEvents();courseSrc.entities.removeAll();featEnts.clear();
+  const f=courseGeo?courseGeo.features:[];let nA=0,nL=0,nLift=0;
+  for(const ft of f){const k=ft.properties.kind;if(k==='piste-area')nA+=ft.geometry.type==='Polygon'?1:ft.geometry.coordinates.length;else if(k==='piste-line')nL++;else if(k==='lift')nLift++;addCourseFeature(ft)}
+  courseSrc.entities.resumeEvents();courseSrc.show=document.getElementById('courseOn').checked;scene.requestRender();mini.request();
   return {nA,nL,nLift}}
 function showCourseInfo(src,cnt){const d=courseGeo&&courseGeo.properties&&courseGeo.properties.fetched;
   document.getElementById('courseInfo').textContent='コース面'+cnt.nA+'・中心線'+cnt.nL+'・リフト'+cnt.nLift+'（'+src+(d?'、取得 '+d.slice(0,10):'')+'）'}
 async function loadCourses(force){
   const info=document.getElementById('courseInfo');
+  if(force){if(localStorage.getItem(COURSE.editKey)&&!confirm('端末で編集したコースは破棄されます。OSMから取り直しますか？'))return;try{localStorage.removeItem(COURSE.editKey)}catch(e){};editSel=null}
   if(!force){
+    try{const v=localStorage.getItem(COURSE.editKey);if(v){courseGeo=JSON.parse(v);showCourseInfo('端末で編集したデータ',drawCourses());return}}catch(e){}
     try{const r=await fetch('data/happo-courses.geojson',{cache:'no-cache'});if(r.ok){courseGeo=await r.json();showCourseInfo('リポジトリのファイル',drawCourses());return}}catch(e){}
     try{const v=localStorage.getItem(COURSE.cacheKey);if(v){courseGeo=JSON.parse(v);showCourseInfo('端末に保存した取得結果',drawCourses());return}}catch(e){}}
   info.textContent='OpenStreetMapから取得中…';
@@ -498,6 +521,64 @@ document.getElementById('courseReload').onclick=()=>loadCourses(true);
 document.getElementById('courseSave').onclick=()=>{if(!courseGeo){alert('コースデータがまだありません');return}
   const a=document.createElement('a');a.href=URL.createObjectURL(new Blob([JSON.stringify(courseGeo)],{type:'application/geo+json'}));a.download='happo-courses.geojson';document.body.appendChild(a);a.click();setTimeout(()=>{URL.revokeObjectURL(a.href);a.remove()},1000)};
 loadCourses(false);
+// ===== コース編集モード（URLに ?edit=1 を付けたときだけ）=====
+// ミニマップでコースをタップ→選択して頂点を表示。頂点ドラッグ＝移動、辺をタップ＝頂点追加、頂点を長押し＝削除。
+// 変更はすぐ3Dに反映し、端末(localStorage)に自動保存。『GeoJSONを書き出す』でクリップボードにコピー。
+// ミニマップには通常モードでもコース(水色)とリフト(白)を表示する。
+(function courseEditor(){
+  const paths=ft=>{const g=ft.geometry;if(g.type==='Polygon')return g.coordinates.map(r=>({c:r,closed:true}));if(g.type==='MultiPolygon')return g.coordinates.flat().map(r=>({c:r,closed:true}));if(g.type==='LineString')return [{c:g.coordinates,closed:false}];return []};
+  const verts=p=>p.closed?p.c.length-1:p.c.length;
+  const isCourse=ft=>ft.properties.kind==='piste-area'||ft.properties.kind==='piste-line';
+  let drag=null,lpTimer=null,saveTimer=null,raf3d=0,infoEl=null;
+  function save(){clearTimeout(saveTimer);saveTimer=setTimeout(()=>{if(!courseGeo)return;courseGeo.properties=courseGeo.properties||{};courseGeo.properties.edited=new Date().toISOString();try{localStorage.setItem(COURSE.editKey,JSON.stringify(courseGeo))}catch(e){}},300)}
+  function live3d(){if(!raf3d)raf3d=requestAnimationFrame(()=>{raf3d=0;redrawFeature(editSel)})}
+  function setInfo(){if(!infoEl)return;infoEl.textContent=editSel?'選択中：'+(editSel.properties.name||(editSel.properties.kind==='piste-line'?'コース(中心線)':'コース(面)'))+'　頂点'+paths(editSel).reduce((n,p)=>n+verts(p),0)+'：ドラッグで移動／辺タップで追加／長押しで削除':'ミニマップでコースをタップして選択'}
+  function select(ft){const old=editSel;editSel=ft;if(old)redrawFeature(old);if(ft)redrawFeature(ft);setInfo();mini.request()}
+  const setV=(p,i,ll)=>{const q=[+ll[0].toFixed(7),+ll[1].toFixed(7)];p.c[i]=q;if(p.closed&&i===0)p.c[p.c.length-1]=q.slice()};
+  function delV(p,i){if(verts(p)<=(p.closed?3:2))return false;p.c.splice(i,1);if(p.closed&&i===0)p.c[p.c.length-1]=p.c[0].slice();return true}
+  const segDist=(x,y,a,b)=>{const dx=b[0]-a[0],dy=b[1]-a[1],L=dx*dx+dy*dy,t=L?Math.max(0,Math.min(1,((x-a[0])*dx+(y-a[1])*dy)/L)):0;return [Math.hypot(x-a[0]-t*dx,y-a[1]-t*dy),t]};
+  function inPoly(x,y,ring){let ins=false;for(let i=0,j=ring.length-1;i<ring.length;j=i++){const a=ring[i],b=ring[j];if((a[1]>y)!==(b[1]>y)&&x<(b[0]-a[0])*(y-a[1])/(b[1]-a[1])+a[0])ins=!ins}return ins}
+  // ミニマップに描く
+  mini.hooks.draw=(ctx,proj)=>{if(!courseGeo||!courseSrc.show)return;
+    for(const ft of courseGeo.features){const k=ft.properties.kind,sel=ft===editSel;
+      for(const p of paths(ft)){if(p.c.length<2)continue;ctx.beginPath();p.c.forEach((q,i)=>{const [x,y]=proj(q[0],q[1]);i?ctx.lineTo(x,y):ctx.moveTo(x,y)});
+        if(k==='lift'){ctx.strokeStyle='#fff';ctx.lineWidth=2;ctx.stroke();continue}
+        if(p.closed){ctx.fillStyle=sel?'rgba(255,170,80,0.35)':'rgba(140,236,255,0.35)';ctx.fill()}
+        ctx.strokeStyle=sel?'#ff6d00':(p.closed?'#0090b0':'rgba(0,160,200,0.8)');ctx.lineWidth=sel?3:(p.closed?1.5:4);ctx.stroke()}}
+    if(EDIT&&editSel)for(const p of paths(editSel))for(let i=0;i<verts(p);i++){const [x,y]=proj(p.c[i][0],p.c[i][1]);ctx.beginPath();const on=drag&&drag.p===p&&drag.i===i;ctx.arc(x,y,on?8:6,0,Math.PI*2);ctx.fillStyle=on&&drag.armed?'#ff1744':'#fff';ctx.fill();ctx.strokeStyle='#ff6d00';ctx.lineWidth=2.5;ctx.stroke()}};
+  if(!EDIT)return;
+  // 編集パネル
+  const row=document.createElement('div');row.id='editRow';row.style.cssText='margin-top:4px;padding:4px;border-radius:8px;background:#fff1e0;font-size:12px';
+  row.innerHTML='<b>コース編集モード</b><div class="ei"></div><button id="editExport">GeoJSONを書き出す</button><button id="editDeselect">選択解除</button><button id="editDiscard">編集を破棄</button>';
+  document.getElementById('courseRow').after(row);infoEl=row.querySelector('.ei');setInfo();
+  document.getElementById('editDeselect').onclick=()=>select(null);
+  document.getElementById('editDiscard').onclick=()=>{if(!localStorage.getItem(COURSE.editKey)){alert('保存された編集はありません');return}if(!confirm('端末に保存した編集内容を破棄して元のデータに戻しますか？'))return;try{localStorage.removeItem(COURSE.editKey)}catch(e){};editSel=null;loadCourses(false).then(setInfo)};
+  document.getElementById('editExport').onclick=async()=>{if(!courseGeo){alert('コースデータがまだありません');return}const txt=JSON.stringify(courseGeo);
+    try{await navigator.clipboard.writeText(txt);alert('GeoJSONをクリップボードにコピーしました（'+Math.round(txt.length/1024)+'KB）')}
+    catch(e){const ta=document.createElement('textarea');ta.value=txt;ta.style.cssText='position:fixed;left:0;top:0;width:1px;height:1px;opacity:0';document.body.appendChild(ta);ta.focus();ta.select();let ok=false;try{ok=document.execCommand('copy')}catch(_){}ta.remove();alert(ok?'GeoJSONをクリップボードにコピーしました':'コピーできませんでした。「GeoJSON保存」でファイルに書き出してください')}};
+  // ミニマップの操作
+  mini.hooks.down=(x,y,t)=>{if(!editSel)return false;let best=null;
+    for(const p of paths(editSel))for(let i=0;i<verts(p);i++){const [vx,vy]=mini.proj(p.c[i][0],p.c[i][1]),d=Math.hypot(vx-x,vy-y);if(d<18&&(!best||d<best.d))best={p,i,d}}
+    if(!best)return false;drag={p:best.p,i:best.i,x0:x,y0:y,t0:t,moved:false,armed:false};
+    lpTimer=setTimeout(()=>{if(drag&&!drag.moved){drag.armed=true;mini.request()}},600);  // 長押し0.6秒で赤く表示（離すと削除）
+    mini.request();return true};
+  mini.hooks.move=(x,y)=>{if(!drag)return;if(!drag.moved&&Math.hypot(x-drag.x0,y-drag.y0)>5){drag.moved=true;clearTimeout(lpTimer)}
+    if(drag.moved){setV(drag.p,drag.i,mini.unproj(x,y));live3d();mini.request()}};
+  mini.hooks.up=(x,y,t,cancelled)=>{clearTimeout(lpTimer);
+    if(drag&&drag.moved)save();
+    else if(drag&&!cancelled&&t-drag.t0>=600){if(delV(drag.p,drag.i)){live3d();save();setInfo()}else alert('これ以上頂点を減らせません')}  // 長押しで削除
+    drag=null;mini.request()};
+  mini.hooks.cancel=()=>{clearTimeout(lpTimer);drag=null;mini.request()};
+  mini.hooks.tap=(x,y)=>{if(!courseGeo)return;
+    if(editSel){let best=null;  // 選択中のコースの辺をタップ→頂点追加
+      for(const p of paths(editSel)){const n=p.c.length-1;for(let i=0;i<n;i++){const a=mini.proj(p.c[i][0],p.c[i][1]),b=mini.proj(p.c[i+1][0],p.c[i+1][1]),[d]=segDist(x,y,a,b);if(d<12&&(!best||d<best.d))best={p,i,d}}}
+      if(best){const q=mini.unproj(x,y);best.p.c.splice(best.i+1,0,[+q[0].toFixed(7),+q[1].toFixed(7)]);live3d();save();setInfo();mini.request();return}}
+    let hit=null;  // コースをタップ→選択（面は内側、中心線は線の近く）
+    for(const ft of courseGeo.features){if(!isCourse(ft))continue;
+      for(const p of paths(ft)){const sp=p.c.map(q=>mini.proj(q[0],q[1]));
+        if(p.closed?inPoly(x,y,sp):sp.some((a,i)=>i&&segDist(x,y,sp[i-1],a)[0]<14)){hit=ft;break}}if(hit)break}
+    select(hit)};
+})();
 // ===== 視点スティック（左下）=====
 // FPSの右スティックと同じ：左右に倒すとその場で左右に回り、上下に倒すと見上げ・見下ろし。カメラの位置は変えない。
 // 倒している間は一定速度で回り続け、離すと即停止。指ごとに追跡するので、ミニマップなどと同時に操作できる。
