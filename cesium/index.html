@@ -30,6 +30,10 @@ input:not([type=range]):not([type=checkbox]):not([type=color]):not([type=button]
 #status,#follow{font-size:12px;color:#444}
 #total{font-weight:bold;margin-top:2px;font-size:13px}
 #courseRow{font-size:12px;margin-top:4px;padding-top:4px;border-top:1px solid #ddd}
+#obj3dRow{font-size:12px;margin-top:4px;padding-top:4px;border-top:1px solid #ddd}
+#obj3dInfo{font-size:11px;color:#555}
+#obj3dStatus{font-size:10.5px;color:#444;line-height:1.35;max-height:80px;overflow-y:auto;white-space:pre-wrap}
+#obj3dStatus .ng{color:#c62828}#obj3dStatus .ok{color:#2e7d32}
 #courseRow input[type=range]{width:80px;vertical-align:middle;touch-action:pan-x}
 #courseInfo{font-size:11px;color:#555}
 #courseStatus{font-size:10.5px;color:#444;line-height:1.35;max-height:110px;overflow-y:auto;touch-action:pan-y;white-space:pre-wrap}
@@ -75,6 +79,7 @@ input:not([type=range]):not([type=checkbox]):not([type=color]):not([type=button]
   <div><button id="top">真上から</button><button id="oblique">斜めから</button><button id="contour">等高線 ON</button><button id="slope">ゲレンデ向き</button></div>
   <div><button id="viewSave">現在の視点を初期位置にする</button><button id="viewCopy">初期視点をコピー</button></div>
   <div id="courseRow"><label><input type="checkbox" id="courseOn" checked>コース</label> 透明度 <input type="range" id="courseAlpha" min="0.1" max="0.9" step="0.05" value="0.45"><div id="courseInfo">コース読み込み中…</div><div id="courseStatus"></div><button id="courseRetry" style="display:none">再取得</button></div>
+  <div id="obj3dRow"><label><input type="checkbox" id="liftsOn" checked>リフト3D</label> <label><input type="checkbox" id="bldOn" checked>建物（近づくと表示）</label><div id="obj3dInfo"></div><div id="obj3dStatus"></div><button id="liftsExport">lifts3d書き出し</button><button id="bldExport">buildings書き出し</button><button id="obj3dRefetch">OSM再取得</button></div>
   <div><button id="newRope">新しいロープ</button><button id="draw">点を打つ</button><button id="undo">1点戻す</button></div>
   <div id="ropeList"></div>
   <div id="total">合計: 0 m</div>
@@ -749,6 +754,109 @@ const editor=EDIT?(function(){
   return {markers,info};
 })():null;
 loadCourses().then(()=>{if(editor){editor.markers();editor.info()}});
+// ===== リフトと建物の立体表示（OpenStreetMap）=====
+// 読み込み順：data/lifts3d.geojson・data/buildings.geojson → 端末に保存した前回の取得結果 → ブラウザからOverpassで取得。
+// 「…書き出し」ボタンでファイルに保存でき、リポジトリの cesium/data/ に置くと次回からそれを読む。
+// リフト：aerialway=pylon の支柱があればその位置、無ければ線に沿って一定間隔で支柱を自動生成。支柱の頂点どうしを空中のワイヤーで結ぶ。
+// 建物：height → building:levels×3.5m → どちらも無ければ OBJ3D.defaultLevels 階建てとして押し出す。カメラが近いときだけ表示。
+const OBJ3D={
+  files:{lifts:'data/lifts3d.geojson',buildings:'data/buildings.geojson'},keys:{lifts:'happoLifts3d',buildings:'happoBuildings'},
+  towerHeight:{gondola:14,cable_car:20,chair_lift:10,mixed_lift:10,drag_lift:6,'t-bar':6,'j-bar':6,platter:6,rope_tow:4,default:10},   // 支柱の高さ(m)
+  towerSpacing:{gondola:200,cable_car:300,chair_lift:90,mixed_lift:120,drag_lift:70,'t-bar':70,'j-bar':70,platter:70,rope_tow:50,default:100},  // 支柱を自動生成するときの間隔(m)
+  stationHeight:6,      // 両端（駅）のワイヤーの高さ(m)
+  levelHeight:3.5,      // 1階あたりの高さ(m)
+  defaultLevels:2,      // height も building:levels も無い建物の階数
+  buildingShowAbove:2500, // カメラが地表からこの高さ(m)以内のときだけ建物を表示
+  skip3d:['station','goods','zip_line','magic_carpet','pylon']  // 立体にしない種類
+};
+const obj3dLog={lines:[],add(t,c){this.lines.push({t,c});const el=document.getElementById('obj3dStatus');el.textContent='';for(const l of this.lines.slice(-8)){const d=document.createElement('div');d.textContent=l.t;if(l.c)d.className=l.c;el.appendChild(d)}}};
+const liftsSrc=new Cesium.CustomDataSource('lifts3d'),bldSrc=new Cesium.CustomDataSource('buildings');viewer.dataSources.add(liftsSrc);viewer.dataSources.add(bldSrc);
+let lifts3dGeo=null,buildingsGeo=null;
+// --- 地表の標高（地形と同じ地理院DEMのズーム14タイルから補間）---
+const groundTiles=new Map();
+async function sampleGround(lon,lat){const z=14,n=1<<z,fx=(lon+180)/360*n,r=lat*Math.PI/180,fy=(1-Math.log(Math.tan(r)+1/Math.cos(r))/Math.PI)/2*n,x=Math.floor(fx),y=Math.floor(fy),k=x+'/'+y;
+  if(!groundTiles.has(k)){groundTiles.set(k,demCall(z,x,y));if(groundTiles.size>80)groundTiles.delete(groundTiles.keys().next().value)}
+  const h=await groundTiles.get(k),px=Math.min(255,Math.max(0,(fx-x)*256-0.5)),py=Math.min(255,Math.max(0,(fy-y)*256-0.5)),x0=Math.floor(px),y0=Math.floor(py),x1=Math.min(255,x0+1),y1=Math.min(255,y0+1),tx=px-x0,ty=py-y0;
+  return (h[y0*256+x0]*(1-tx)+h[y0*256+x1]*tx)*(1-ty)+(h[y1*256+x0]*(1-tx)+h[y1*256+x1]*tx)*ty}
+// --- Overpassの結果 → lifts3d.geojson / buildings.geojson ---
+const mDist=(a,b)=>Math.hypot((b[0]-a[0])*Math.cos(a[1]*Math.PI/180)*111320,(b[1]-a[1])*110540);
+function generateTowers(c,spacing){  // 線に沿って一定間隔で支柱の位置を作る（両端の駅は除く）
+  const seg=[];let L=0;for(let i=1;i<c.length;i++){const d=mDist(c[i-1],c[i]);seg.push(d);L+=d}
+  const n=Math.max(1,Math.ceil(L/spacing)),out=[];
+  for(let k=1;k<n;k++){let t=k*L/n,i=0;while(i<seg.length-1&&t>seg[i]){t-=seg[i];i++}const f=seg[i]?t/seg[i]:0;out.push([+(c[i][0]+(c[i+1][0]-c[i][0])*f).toFixed(7),+(c[i][1]+(c[i+1][1]-c[i][1])*f).toFixed(7)])}
+  return out}
+function osmToLifts3d(osm){const pylons=new Map(),feats=[];
+  for(const e of osm.elements||[])if(e.type==='node'&&e.tags&&e.tags.aerialway==='pylon')pylons.set(e.id,[+e.lon.toFixed(7),+e.lat.toFixed(7)]);
+  for(const e of osm.elements||[]){if(e.type!=='way'||!e.geometry||!e.tags||!e.tags.aerialway||OBJ3D.skip3d.includes(e.tags.aerialway))continue;
+    const t=e.tags,c=e.geometry.map(p=>[+p.lon.toFixed(7),+p.lat.toFixed(7)]);if(c.length<2)continue;
+    let towers=(e.nodes||[]).map(id=>pylons.get(id)).filter(Boolean),src='osm';
+    if(!towers.length){towers=generateTowers(c,OBJ3D.towerSpacing[t.aerialway]||OBJ3D.towerSpacing.default);src='generated'}
+    feats.push({type:'Feature',properties:{id:'way/'+e.id,name:t.name||t['name:ja']||'',aerialway:t.aerialway,towers,towerSource:src,towerHeight:OBJ3D.towerHeight[t.aerialway]||OBJ3D.towerHeight.default},geometry:{type:'LineString',coordinates:c}})}
+  return {type:'FeatureCollection',properties:{source:'OpenStreetMap (Overpass API)',license:'ODbL © OpenStreetMap contributors',note:'支柱は aerialway=pylon、無いリフトは一定間隔で自動生成',generated:new Date().toISOString()},features:feats}}
+function buildingHeight(t){const num=v=>{const x=parseFloat(String(v||'').replace(',','.'));return isFinite(x)&&x>0?x:null};
+  const h=num(t.height);if(h)return {height:+h.toFixed(1),heightSource:'height'};
+  const lv=num(t['building:levels']);if(lv)return {height:+(lv*OBJ3D.levelHeight).toFixed(1),levels:lv,heightSource:'levels'};
+  return {height:+(OBJ3D.defaultLevels*OBJ3D.levelHeight).toFixed(1),levels:OBJ3D.defaultLevels,heightSource:'default'}}
+function osmToBuildings(osm){const feats=[],ll=g=>g.map(p=>[+p.lon.toFixed(7),+p.lat.toFixed(7)]);
+  for(const e of osm.elements||[]){const t=e.tags||{};if(!t.building)continue;let ring=null;
+    if(e.type==='way'&&e.geometry)ring=HappoCourses.cleanRing(ll(e.geometry),false);
+    else if(e.type==='relation'&&e.members){const outs=HappoCourses.joinRings(e.members.filter(m=>m.type==='way'&&m.geometry&&m.role!=='inner').map(m=>ll(m.geometry)));if(outs[0])ring=HappoCourses.cleanRing(outs[0],false)}
+    if(!ring)continue;
+    feats.push({type:'Feature',properties:Object.assign({id:e.type+'/'+e.id,name:t.name||t['name:ja']||''},buildingHeight(t)),geometry:{type:'Polygon',coordinates:[ring]}})}
+  return {type:'FeatureCollection',properties:{source:'OpenStreetMap (Overpass API)',license:'ODbL © OpenStreetMap contributors',note:'高さ：height → building:levels×'+OBJ3D.levelHeight+'m → 無ければ'+OBJ3D.defaultLevels+'階建て',generated:new Date().toISOString()},features:feats}}
+async function overpassQuery(q,label){
+  for(const url of COURSE.overpass){const host=new URL(url).host,ac=new AbortController(),tm=setTimeout(()=>ac.abort(),60000);
+    try{const r=await fetch(url,{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:'data='+encodeURIComponent(q),signal:ac.signal});if(!r.ok)throw new Error('HTTP '+r.status);
+      const j=await r.json();obj3dLog.add('✓ '+label+'：'+host+' から取得','ok');return j}
+    catch(e){obj3dLog.add('✗ '+label+'：'+host+'：'+whyFailed(e),'ng')}finally{clearTimeout(tm)}}
+  throw new Error('すべてのOverpassミラーで取得できませんでした')}
+// --- 描画 ---
+async function drawLifts(){liftsSrc.entities.removeAll();if(!lifts3dGeo)return;let nT=0;
+  for(const f of lifts3dGeo.features){const p=f.properties,c=f.geometry.coordinates;if(!c||c.length<2)continue;
+    const th=p.towerHeight||OBJ3D.towerHeight[p.aerialway]||OBJ3D.towerHeight.default,towers=p.towers||[];
+    const pts=[{q:c[0],h:OBJ3D.stationHeight},...towers.map(q=>({q,h:th})),{q:c[c.length-1],h:OBJ3D.stationHeight}];
+    const g=await Promise.all(pts.map(o=>sampleGround(o.q[0],o.q[1])));
+    liftsSrc.entities.suspendEvents();
+    towers.forEach((q,i)=>{const base=g[i+1];nT++;  // 支柱：地表から高さthの柱
+      liftsSrc.entities.add({position:Cesium.Cartesian3.fromDegrees(q[0],q[1],base+th/2),cylinder:{length:th+1,topRadius:0.35,bottomRadius:0.6,material:Cesium.Color.fromCssColorString('#5f6368'),distanceDisplayCondition:new Cesium.DistanceDisplayCondition(0,8000)}})});
+    liftsSrc.entities.add({polyline:{positions:Cesium.Cartesian3.fromDegreesArrayHeights(pts.flatMap((o,i)=>[o.q[0],o.q[1],g[i]+o.h])),width:2,arcType:Cesium.ArcType.NONE,material:Cesium.Color.fromCssColorString('#1e1e1e').withAlpha(0.9)}});  // ワイヤー
+    liftsSrc.entities.resumeEvents()}
+  scene.requestRender();return nT}
+async function drawBuildings(){bldSrc.entities.removeAll();if(!buildingsGeo)return;const ddc=new Cesium.DistanceDisplayCondition(0,OBJ3D.buildingShowAbove+500);
+  const mat=Cesium.Color.fromCssColorString('#f3f1ea').withAlpha(0.95),outline=Cesium.Color.fromCssColorString('#8a8a8a');let n=0;
+  for(const f of buildingsGeo.features){const ring=f.geometry.coordinates[0];if(!ring||ring.length<4)continue;
+    const step=Math.max(1,Math.floor((ring.length-1)/8)),samples=await Promise.all(ring.slice(0,-1).filter((_,i)=>i%step===0).map(q=>sampleGround(q[0],q[1])));
+    const base=Math.min(...samples)-1,top=Math.max(...samples)+(f.properties.height||OBJ3D.defaultLevels*OBJ3D.levelHeight);  // 斜面でも埋もれ・浮きが出ないよう低い側に底、高い側から高さを取る
+    bldSrc.entities.add({polygon:{hierarchy:new Cesium.PolygonHierarchy(Cesium.Cartesian3.fromDegreesArray(ring.flat())),height:base,extrudedHeight:top,material:mat,outline:true,outlineColor:outline,distanceDisplayCondition:ddc}});n++;
+    if(f.properties.name){let sx=0,sy=0;ring.slice(0,-1).forEach(q=>{sx+=q[0];sy+=q[1]});const k=ring.length-1;
+      bldSrc.entities.add({position:Cesium.Cartesian3.fromDegrees(sx/k,sy/k,top+4),label:{text:f.properties.name,font:'bold 12px sans-serif',fillColor:Cesium.Color.fromCssColorString('#222'),outlineColor:Cesium.Color.WHITE,outlineWidth:3,style:Cesium.LabelStyle.FILL_AND_OUTLINE,distanceDisplayCondition:new Cesium.DistanceDisplayCondition(0,1500),verticalOrigin:Cesium.VerticalOrigin.BOTTOM}})}}
+  updateBuildingVisibility();scene.requestRender();return n}
+function updateBuildingVisibility(){const c=camera.positionCartographic,above=lastGround==null?c.height:c.height-lastGround;
+  const on=document.getElementById('bldOn').checked&&above<OBJ3D.buildingShowAbove;if(bldSrc.show!==on){bldSrc.show=on;scene.requestRender()}}
+camera.changed.addEventListener(updateBuildingVisibility);camera.moveEnd.addEventListener(updateBuildingVisibility);
+// --- 読み込み ---
+const BB=()=>{const [s_,w_,n_,e_]=COURSE.bbox;return s_+','+w_+','+n_+','+e_};
+const OBJ3D_SRC={
+  lifts:{label:'リフト',query:()=>'[out:json][timeout:60];way["aerialway"]('+BB()+')->.l;.l out geom;node(w.l)["aerialway"="pylon"];out;',convert:osmToLifts3d,set:g=>{lifts3dGeo=g},draw:drawLifts},
+  buildings:{label:'建物',query:()=>'[out:json][timeout:90];(way["building"]('+BB()+');relation["building"]["type"="multipolygon"]('+BB()+'););out geom;',convert:osmToBuildings,set:g=>{buildingsGeo=g},draw:drawBuildings}};
+const obj3dCount={};
+function showObj3dInfo(){document.getElementById('obj3dInfo').textContent=['lifts','buildings'].map(k=>OBJ3D_SRC[k].label+(obj3dCount[k]||'未読み込み')).join('／')}
+async function loadObj3d(kind,forceOsm){const S=OBJ3D_SRC[kind];let geo=null,src='';
+  if(!forceOsm){try{const r=await fetch(OBJ3D.files[kind],{cache:'no-cache'});if(r.ok){geo=await r.json();src=OBJ3D.files[kind].split('/').pop()}else obj3dLog.add('・'+S.label+'：'+OBJ3D.files[kind].split('/').pop()+' はまだ無い')}catch(e){}
+    if(!geo){const v=lsGet(OBJ3D.keys[kind]);if(v&&v.features&&v.features.length){geo=v;src='端末に保存した取得結果'}}}
+  if(!geo){obj3dLog.add('… '+S.label+'をOpenStreetMapから取得中');try{geo=S.convert(await overpassQuery(S.query(),S.label));src='OSMから取得';if(!lsSet(OBJ3D.keys[kind],geo))obj3dLog.add('・'+S.label+'：端末に保存できませんでした（容量不足）。書き出しボタンで保存してください')}
+    catch(e){obj3dLog.add('✗ '+S.label+'を取得できませんでした','ng');obj3dCount[kind]='：取得失敗';showObj3dInfo();return}}
+  S.set(geo);const n=geo.features.length;obj3dCount[kind]=n+'件（'+src+'）';showObj3dInfo();
+  const m=await S.draw();if(kind==='lifts')obj3dCount[kind]=n+'本・支柱'+m+'本（'+src+'）';showObj3dInfo();obj3dLog.add('✓ '+S.label+'：'+n+'件を表示','ok')}
+function downloadGeo(geo,name){if(!geo){alert('まだデータがありません');return}const a=document.createElement('a');a.href=URL.createObjectURL(new Blob([JSON.stringify(geo)],{type:'application/geo+json'}));a.download=name;document.body.appendChild(a);a.click();setTimeout(()=>{URL.revokeObjectURL(a.href);a.remove()},1000)}
+document.getElementById('liftsOn').onchange=e=>{liftsSrc.show=e.target.checked;scene.requestRender()};
+document.getElementById('bldOn').onchange=()=>updateBuildingVisibility();
+document.getElementById('liftsExport').onclick=()=>downloadGeo(lifts3dGeo,'lifts3d.geojson');
+document.getElementById('bldExport').onclick=()=>downloadGeo(buildingsGeo,'buildings.geojson');
+document.getElementById('obj3dRefetch').onclick=async()=>{if(!confirm('リフトと建物を OpenStreetMap から取り直しますか？'))return;try{localStorage.removeItem(OBJ3D.keys.lifts);localStorage.removeItem(OBJ3D.keys.buildings)}catch(e){}
+  await loadObj3d('lifts',true);await loadObj3d('buildings',true)};
+showObj3dInfo();
+(async()=>{await loadObj3d('lifts');await loadObj3d('buildings')})();
 // ===== 視点スティック（左下）=====
 // FPSの右スティックと同じ：左右に倒すとその場で左右に回り、上下に倒すと見上げ・見下ろし。カメラの位置は変えない。
 // 倒している間は一定速度で回り続け、離すと即停止。指ごとに追跡するので、ミニマップなどと同時に操作できる。
