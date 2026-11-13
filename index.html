@@ -7,52 +7,76 @@ else{
 // 表示範囲：北アルプス全体(東経137.3〜138.2、北緯36.0〜36.9)。タイルは少し外側まで読む。
 const viewBounds=[[137.3,36.0],[138.2,36.9]];
 const tileBounds=[137.25,35.95,138.25,36.95];
-maplibregl.setMaxParallelImageRequests(8);
-// 国土地理院 10m標高PNGタイル(dem_png、z1〜14)：h=(R*65536+G*256+B)/100、x=0x800000は無効値、x>0x800000は負値。
-// ブラウザの色補正で値が狂わないよう、PNGを自前で解凍して画素値を直接読む。
-// 無効値は同じ行→同じ列の最寄りの有効値で埋め、無ければ0。Terrarium形式に変換して渡す。
-async function buildGsiDem(z,x,y){
-  const r=await fetch('https://cyberjapandata.gsi.go.jp/xyz/dem_png/'+z+'/'+x+'/'+y+'.png');if(!r.ok)throw new Error('missing');
-  const buf=new Uint8Array(await r.arrayBuffer());
-  const u32=o=>((buf[o]<<24)|(buf[o+1]<<16)|(buf[o+2]<<8)|buf[o+3])>>>0;
-  let o=8,W=0,H=0,depth=0,ctype=0,inter=0,plte=null,trns=null;const idat=[];
-  while(o<buf.length){const len=u32(o),type=String.fromCharCode(buf[o+4],buf[o+5],buf[o+6],buf[o+7]),d=buf.subarray(o+8,o+8+len);
-    if(type==='IHDR'){W=u32(o+8);H=u32(o+12);depth=d[8];ctype=d[9];inter=d[12]}else if(type==='PLTE')plte=d;else if(type==='tRNS')trns=d;else if(type==='IDAT')idat.push(d);else if(type==='IEND')break;o+=12+len}
-  if(depth!==8||inter!==0||![0,2,3,4,6].includes(ctype))throw new Error('unsupported png');
-  const raw=new Uint8Array(await new Response(new Blob(idat).stream().pipeThrough(new DecompressionStream('deflate'))).arrayBuffer());
-  const bpp={0:1,2:3,3:1,4:2,6:4}[ctype],stride=W*bpp,px=new Uint8Array(H*stride);
-  for(let row=0;row<H;row++){const f=raw[row*(stride+1)],src=row*(stride+1)+1,dst=row*stride,up=dst-stride;
-    for(let i=0;i<stride;i++){const v=raw[src+i],a=i>=bpp?px[dst+i-bpp]:0,b=row?px[up+i]:0,c=(row&&i>=bpp)?px[up+i-bpp]:0;let pr;
-      if(f===0)pr=0;else if(f===1)pr=a;else if(f===2)pr=b;else if(f===3)pr=(a+b)>>1;else{const p=a+b-c,pa=Math.abs(p-a),pb=Math.abs(p-b),pc=Math.abs(p-c);pr=(pa<=pb&&pa<=pc)?a:(pb<=pc?b:c)}
-      px[dst+i]=(v+pr)&255}}
-  const N=W*H,h=new Float32Array(N);
-  for(let k=0;k<N;k++){let R,G,B,A=255;
-    if(ctype===2){R=px[k*3];G=px[k*3+1];B=px[k*3+2];if(trns&&trns.length>=6&&R===trns[1]&&G===trns[3]&&B===trns[5])A=0}
-    else if(ctype===6){R=px[k*4];G=px[k*4+1];B=px[k*4+2];A=px[k*4+3]}
-    else if(ctype===3){const q=px[k];R=plte[q*3];G=plte[q*3+1];B=plte[q*3+2];if(trns&&q<trns.length)A=trns[q]}
-    else{R=G=B=px[k*bpp];if(ctype===4)A=px[k*2+1]}
-    const v=R*65536+G*256+B;h[k]=(A===0||v===8388608)?NaN:(v>8388608?(v-16777216)/100:v/100)}
-  for(let pass=0;pass<2;pass++){const n=pass?H:W,m=pass?W:H,at=pass?(i,j)=>i*W+j:(i,j)=>j*W+i;
-    for(let j=0;j<m;j++){let last=NaN;const fwd=new Float32Array(n);
-      for(let i=0;i<n;i++){const v=h[at(i,j)];if(!Number.isNaN(v))last=v;fwd[i]=last}last=NaN;
-      for(let i=n-1;i>=0;i--){const k=at(i,j),v=h[k];if(!Number.isNaN(v)){last=v;continue}const L=fwd[i];h[k]=Number.isNaN(L)?last:(Number.isNaN(last)?L:(L+last)/2)}}}
-  const img=new ImageData(W,H),d=img.data;
-  for(let k=0;k<N;k++){const hv=Number.isNaN(h[k])?0:Math.max(-32768,Math.min(32767,h[k])),v=hv+32768,fl=Math.floor(v);
+maplibregl.setMaxParallelImageRequests(6);
+// 国土地理院 標高PNGタイル：h=(R*65536+G*256+B)/100、x=0x800000は無効値、x>0x800000は負値。
+// ズーム14以下=10m(dem_png)、ズーム15=5m(dem5a_png)。5mの無効値・欠けは10m(親タイル)の値を補間して埋め、それも無ければ周囲の値→0。
+// ブラウザの色補正で値が狂わないよう、PNGは自前で解凍して画素値を直接読む。Terrarium形式で渡す。
+async function buildGsiDem(z,x,y,signal){
+  const GSI='https://cyberjapandata.gsi.go.jp/xyz/';
+  async function heights(layer,lz,lx,ly,sig){
+    const r=await fetch(GSI+layer+'/'+lz+'/'+lx+'/'+ly+'.png',{signal:sig});if(!r.ok)return null;
+    const buf=new Uint8Array(await r.arrayBuffer());
+    const u32=o=>((buf[o]<<24)|(buf[o+1]<<16)|(buf[o+2]<<8)|buf[o+3])>>>0;
+    let o=8,W=0,H=0,depth=0,ctype=0,inter=0,plte=null,trns=null;const idat=[];
+    while(o<buf.length){const len=u32(o),type=String.fromCharCode(buf[o+4],buf[o+5],buf[o+6],buf[o+7]),d=buf.subarray(o+8,o+8+len);
+      if(type==='IHDR'){W=u32(o+8);H=u32(o+12);depth=d[8];ctype=d[9];inter=d[12]}else if(type==='PLTE')plte=d;else if(type==='tRNS')trns=d;else if(type==='IDAT')idat.push(d);else if(type==='IEND')break;o+=12+len}
+    if(W!==256||H!==256||depth!==8||inter!==0||![0,2,3,4,6].includes(ctype))return null;
+    const raw=new Uint8Array(await new Response(new Blob(idat).stream().pipeThrough(new DecompressionStream('deflate'))).arrayBuffer());
+    const bpp={0:1,2:3,3:1,4:2,6:4}[ctype],stride=W*bpp,px=new Uint8Array(H*stride);
+    for(let row=0;row<H;row++){const f=raw[row*(stride+1)],src=row*(stride+1)+1,dst=row*stride,up=dst-stride;
+      for(let i=0;i<stride;i++){const v=raw[src+i],a=i>=bpp?px[dst+i-bpp]:0,b=row?px[up+i]:0,c=(row&&i>=bpp)?px[up+i-bpp]:0;let pr;
+        if(f===0)pr=0;else if(f===1)pr=a;else if(f===2)pr=b;else if(f===3)pr=(a+b)>>1;else{const p=a+b-c,pa=Math.abs(p-a),pb=Math.abs(p-b),pc=Math.abs(p-c);pr=(pa<=pb&&pa<=pc)?a:(pb<=pc?b:c)}
+        px[dst+i]=(v+pr)&255}}
+    const h=new Float32Array(65536);
+    for(let k=0;k<65536;k++){let R,G,B,A=255;
+      if(ctype===2){R=px[k*3];G=px[k*3+1];B=px[k*3+2];if(trns&&trns.length>=6&&R===trns[1]&&G===trns[3]&&B===trns[5])A=0}
+      else if(ctype===6){R=px[k*4];G=px[k*4+1];B=px[k*4+2];A=px[k*4+3]}
+      else if(ctype===3){const q=px[k];R=plte[q*3];G=plte[q*3+1];B=plte[q*3+2];if(trns&&q<trns.length)A=trns[q]}
+      else{R=G=B=px[k*bpp];if(ctype===4)A=px[k*2+1]}
+      const v=R*65536+G*256+B;h[k]=(A===0||v===8388608)?NaN:(v>8388608?(v-16777216)/100:v/100)}
+    return h}
+  function fill(h){ // 無効値を同じ行→同じ列の最寄り有効値で埋め、残りは0
+    for(let pass=0;pass<2;pass++){const at=pass?(i,j)=>i*256+j:(i,j)=>j*256+i;
+      for(let j=0;j<256;j++){let last=NaN;const fwd=new Float32Array(256);
+        for(let i=0;i<256;i++){const v=h[at(i,j)];if(!Number.isNaN(v))last=v;fwd[i]=last}last=NaN;
+        for(let i=255;i>=0;i--){const k=at(i,j),v=h[k];if(!Number.isNaN(v)){last=v;continue}const L=fwd[i];h[k]=Number.isNaN(L)?last:(Number.isNaN(last)?L:(L+last)/2)}}}
+    for(let k=0;k<65536;k++)if(Number.isNaN(h[k]))h[k]=0;return h}
+  function parent10(px_,py_){ // 5mの補完用10m親タイル(子4枚で共有するのでキャッシュ)
+    const C=globalThis.__gsiParent||(globalThis.__gsiParent=new Map()),key=px_+'/'+py_;
+    if(!C.has(key)){const pr=heights('dem_png',14,px_,py_).then(h=>h&&fill(h));pr.catch(()=>C.delete(key));C.set(key,pr);if(C.size>24)C.delete(C.keys().next().value)}
+    return C.get(key)}
+  let h;
+  if(z<=14){h=await heights('dem_png',z,x,y,signal);if(!h)throw new Error('missing');fill(h)}
+  else{
+    h=await heights('dem5a_png',15,x,y,signal);let hasNA=!h;
+    if(h)for(let k=0;k<65536;k++)if(Number.isNaN(h[k])){hasNA=true;break}
+    if(hasNA){let P=null;try{P=await parent10(x>>1,y>>1)}catch(e){}
+      if(!h){if(!P)throw new Error('missing');h=new Float32Array(65536).fill(NaN)}
+      if(P){const ox=(x&1)*128,oy=(y&1)*128;
+        for(let row=0;row<256;row++)for(let col=0;col<256;col++){const k=row*256+col;if(!Number.isNaN(h[k]))continue;
+          const fx=Math.min(255,Math.max(0,ox+(col+0.5)/2-0.5)),fy=Math.min(255,Math.max(0,oy+(row+0.5)/2-0.5)),x0=Math.floor(fx),y0=Math.floor(fy),x1=Math.min(255,x0+1),y1=Math.min(255,y0+1),tx=fx-x0,ty=fy-y0;
+          h[k]=(P[y0*256+x0]*(1-tx)+P[y0*256+x1]*tx)*(1-ty)+(P[y1*256+x0]*(1-tx)+P[y1*256+x1]*tx)*ty}}
+      fill(h)}}
+  const img=new ImageData(256,256),d=img.data;
+  for(let k=0;k<65536;k++){const v=Math.max(-32768,Math.min(32767,h[k]))+32768,fl=Math.floor(v);
     d[k*4]=fl>>8;d[k*4+1]=fl&255;d[k*4+2]=Math.floor((v-fl)*256);d[k*4+3]=255}
   return createImageBitmap(img,{premultiplyAlpha:'none',colorSpaceConversion:'none'})}
 let demWorker=null,demSeq=0;const demPending=new Map();
 try{if(typeof DecompressionStream!=='undefined'){
-  const src=buildGsiDem.toString()+";self.onmessage=async e=>{const {id,z,x,y}=e.data;try{const b=await buildGsiDem(z,x,y);self.postMessage({id,bitmap:b},[b])}catch(err){self.postMessage({id,missing:err.message==='missing',err:String(err)})}};";
+  const src=buildGsiDem.toString()+";const ctrls=new Map();self.onmessage=async e=>{const m=e.data;if(m.cancel){const c=ctrls.get(m.cancel);if(c)c.abort();return}const ac=new AbortController();ctrls.set(m.id,ac);try{const b=await buildGsiDem(m.z,m.x,m.y,ac.signal);self.postMessage({id:m.id,bitmap:b},[b])}catch(err){self.postMessage({id:m.id,missing:err.message==='missing',aborted:err.name==='AbortError',err:String(err)})}finally{ctrls.delete(m.id)}};";
   demWorker=new Worker(URL.createObjectURL(new Blob([src],{type:'text/javascript'})));
   demWorker.onmessage=e=>{const p=demPending.get(e.data.id);if(!p)return;demPending.delete(e.data.id);e.data.bitmap?p.res(e.data.bitmap):p.rej(e.data)};
   demWorker.onerror=()=>{demWorker=null;for(const p of demPending.values())p.rej({});demPending.clear()}}}catch(e){demWorker=null}
-maplibregl.addProtocol('gsidem',async(params)=>{
+// 表示範囲から外れて不要になったタイルは読み込みを中止する
+maplibregl.addProtocol('gsidem',async(params,abort)=>{
   const [z,x,y]=params.url.replace('gsidem://','').split('/').map(Number);let bmp;
-  if(demWorker){try{bmp=await new Promise((res,rej)=>{const id=++demSeq;demPending.set(id,{res,rej});demWorker.postMessage({id,z,x,y})})}
-    catch(e){if(e&&e.missing)throw new Error('標高タイルなし '+z+'/'+x+'/'+y);bmp=await buildGsiDem(z,x,y)}}
-  else bmp=await buildGsiDem(z,x,y);
+  if(demWorker){const id=++demSeq;const onAbort=()=>{if(demWorker)demWorker.postMessage({cancel:id})};abort.signal.addEventListener('abort',onAbort);
+    try{bmp=await new Promise((res,rej)=>{demPending.set(id,{res,rej});demWorker.postMessage({id,z,x,y})})}
+    catch(e){if(abort.signal.aborted||(e&&e.aborted))throw new DOMException('aborted','AbortError');if(e&&e.missing)throw new Error('標高タイルなし '+z+'/'+x+'/'+y);bmp=await buildGsiDem(z,x,y,abort.signal)}
+    finally{abort.signal.removeEventListener('abort',onAbort)}}
+  else bmp=await buildGsiDem(z,x,y,abort.signal);
   return {data:bmp}});
-const map=new maplibregl.Map({container:'map',center,zoom:12,minZoom:9,maxBounds:viewBounds,maxPitch:85,pitch:65,bearing:-15,style:{version:8,sources:{photo:{type:'raster',tiles:['https://cyberjapandata.gsi.go.jp/xyz/seamlessphoto/{z}/{x}/{y}.jpg'],tileSize:256,minzoom:2,maxzoom:18,bounds:tileBounds,attribution:'国土地理院（シームレス空中写真・数値標高モデル）'},dem:{type:'raster-dem',tiles:['gsidem://{z}/{x}/{y}'],tileSize:256,encoding:'terrarium',minzoom:1,maxzoom:14,bounds:tileBounds},demLow:{type:'raster-dem',tiles:['gsidem://{z}/{x}/{y}'],tileSize:256,encoding:'terrarium',minzoom:1,maxzoom:11,bounds:tileBounds}},layers:[{id:'photo',type:'raster',source:'photo'}],terrain:{source:'dem',exaggeration:1}}});
+const map=new maplibregl.Map({container:'map',center,zoom:12,minZoom:9,maxBounds:viewBounds,maxPitch:85,pitch:65,bearing:-15,style:{version:8,sources:{photo:{type:'raster',tiles:['https://cyberjapandata.gsi.go.jp/xyz/seamlessphoto/{z}/{x}/{y}.jpg'],tileSize:256,minzoom:2,maxzoom:18,bounds:tileBounds,attribution:'国土地理院（シームレス空中写真・数値標高モデル）'},dem:{type:'raster-dem',tiles:['gsidem://{z}/{x}/{y}'],tileSize:256,encoding:'terrarium',minzoom:1,maxzoom:15,bounds:tileBounds},demLow:{type:'raster-dem',tiles:['gsidem://{z}/{x}/{y}'],tileSize:256,encoding:'terrarium',minzoom:1,maxzoom:11,bounds:tileBounds}},layers:[{id:'photo',type:'raster',source:'photo'}],terrain:{source:'dem',exaggeration:1}}});
 map.addControl(new maplibregl.NavigationControl(),'bottom-right');
 const syncDem=()=>{const want=map.getZoom()<11?'demLow':'dem';const t=map.getTerrain();if(!t||t.source!==want)map.setTerrain({source:want,exaggeration:1})};map.on('zoomend',syncDem);map.once('load',syncDem);
 function feature(points,kind){return {type:'Feature',geometry:{type:kind,coordinates:points},properties:{}}}
