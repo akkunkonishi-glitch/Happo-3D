@@ -60,6 +60,7 @@ input:not([type=range]):not([type=checkbox]):not([type=color]):not([type=button]
   <b>八方尾根 3D 管理マップ（Cesium版）</b>
   <div id="status">読み込み中…</div>
   <div><button id="top">真上から</button><button id="oblique">斜めから</button><button id="contour">等高線 ON</button><button id="slope">ゲレンデ向き</button></div>
+  <div><button id="viewSave">現在の視点を初期位置にする</button><button id="viewCopy">初期視点をコピー</button></div>
   <div id="courseRow"><label><input type="checkbox" id="courseOn" checked>コース</label> 透明度 <input type="range" id="courseAlpha" min="0.1" max="0.9" step="0.05" value="0.45"><div id="courseInfo">コース読み込み中…</div><div id="courseStatus"></div><button id="courseRetry" style="display:none">再取得</button></div>
   <div><button id="newRope">新しいロープ</button><button id="draw">点を打つ</button><button id="undo">1点戻す</button></div>
   <div id="ropeList"></div>
@@ -80,6 +81,13 @@ const boundary=[[137.79031276702884, 36.71360253057494], [137.79031276702884, 36
 const LIMIT={west:137.3,south:36.0,east:138.2,north:36.9,maxHeight:60000};
 const limitRect=Cesium.Rectangle.fromDegrees(137.25,35.95,138.25,36.95);
 // ===== 設定（ここの数字を変えるだけで調整できます）=====
+// ===== 初期視点（ページを開いたときのカメラ）=====
+// 「初期視点をコピー」でコピーした値をここに貼ると、全端末で同じ初期視点になる。
+// 端末で「現在の視点を初期位置にする」を押した場合は、その端末だけ保存値(localStorage)が優先される。
+//   lon/lat：経度・緯度、height：カメラの標高(m)、heading：方位(度、北=0・東=90)、pitch：傾き(度、マイナスで見下ろし)、
+//   aboveGround：地表からの高さ(m)。地形の読み込み後、その地点の地表＋この高さに合わせる（nullならheightのまま）
+const DEFAULT_VIEW={lon:137.814,lat:36.618,height:7500,heading:0,pitch:-32,aboveGround:null};
+const VIEW_KEY='happoInitialView';
 const SETTINGS={
   followHeight:20,   // 地表追従の既定の高さ(m)。画面右端のスライダーで2〜100mに変更できる
   rotateSpeed:1.5,   // 2本指でひねったときの回転の感度(1=指と同じ角度)
@@ -95,7 +103,10 @@ const SETTINGS={
   stickPitchSpeed:40 // 視点スティック：見上げ・見下ろしの速さ(度/秒)
 };
 
-const EDIT=new URLSearchParams(location.search).get('edit')==='1';  // URLに ?edit=1 を付けたときだけコース編集モード
+const EDIT=new URLSearchParams(location.search).get('edit')==='1';
+async function copyText(txt){  // クリップボードにコピー（使えない環境では別の方法で）
+  try{await navigator.clipboard.writeText(txt);return true}
+  catch(e){const ta=document.createElement('textarea');ta.value=txt;ta.style.cssText='position:fixed;left:0;top:0;width:1px;height:1px;opacity:0';document.body.appendChild(ta);ta.focus();ta.select();let ok=false;try{ok=document.execCommand('copy')}catch(_){}ta.remove();return ok}}  // URLに ?edit=1 を付けたときだけコース編集モード
 // ===== 国土地理院DEM（PNG標高タイル）=====
 // h=(R*65536+G*256+B)/100、x=0x800000は無効値、x>0x800000は負値。ズーム14以下=10m(dem_png)、ズーム15=5m(dem5a_png)。
 // 5mの無効値・欠けは10mの値を補間して埋め、それも無ければ周囲の値→0。PNGは自前で解凍し、ブラウザの色補正の影響を受けない。
@@ -190,7 +201,12 @@ viewer.entities.add({polyline:{positions:Cesium.Cartesian3.fromDegreesArray([...
 // ===== 初期視点 =====
 function viewOblique(duration){camera.flyTo({destination:Cesium.Cartesian3.fromDegrees(137.814,36.618,7500),orientation:{heading:0,pitch:Cesium.Math.toRadians(-32),roll:0},duration})}
 function viewTop(duration){camera.flyTo({destination:Cesium.Cartesian3.fromDegrees(137.814,36.696,12000),orientation:{heading:0,pitch:-Cesium.Math.PI_OVER_TWO,roll:0},duration})}
-viewOblique(0);
+function loadInitialView(){try{const v=JSON.parse(localStorage.getItem(VIEW_KEY)||'null');if(v&&isFinite(v.lon)&&isFinite(v.lat)&&isFinite(v.height))return Object.assign({},DEFAULT_VIEW,v)}catch(e){}return Object.assign({},DEFAULT_VIEW)}
+let pendingGroundFix=null;  // 地形が細かく読み込まれていく間（最大30秒）、「地表＋aboveGround」に合わせ続ける
+function applyView(v){
+  camera.setView({destination:Cesium.Cartesian3.fromDegrees(v.lon,v.lat,v.height),orientation:{heading:Cesium.Math.toRadians(v.heading||0),pitch:Cesium.Math.toRadians(v.pitch==null?-32:v.pitch),roll:0}});
+  pendingGroundFix=v.aboveGround!=null&&isFinite(v.aboveGround)?{lon:v.lon,lat:v.lat,above:+v.aboveGround,until:performance.now()+30000,lastH:v.height,first:true}:null;scene.requestRender()}
+applyView(loadInitialView());
 document.getElementById('top').onclick=()=>{releaseFollow();viewTop(1)};
 document.getElementById('oblique').onclick=()=>{releaseFollow();viewOblique(1)};
 
@@ -300,6 +316,17 @@ scene.preRender.addEventListener(()=>{
   const lon=Cesium.Math.toDegrees(carto.longitude),lat=Cesium.Math.toDegrees(carto.latitude);
   const cl=Math.min(LIMIT.east,Math.max(LIMIT.west,lon)),ca=Math.min(LIMIT.north,Math.max(LIMIT.south,lat)),ch=Math.min(LIMIT.maxHeight,carto.height);
   if(cl!==lon||ca!==lat||ch!==carto.height){carto.longitude=Cesium.Math.toRadians(cl);carto.latitude=Cesium.Math.toRadians(ca);setCamHeight(carto,ch);carto.height=ch}
+  if(pendingGroundFix){const f=pendingGroundFix;
+    // 自分でカメラを動かした（位置か高さが最後に合わせた値と違う）／時間切れなら合わせ直しをやめる
+    const moved=Math.abs(Cesium.Math.toDegrees(carto.longitude)-f.lon)>0.0005||Math.abs(Cesium.Math.toDegrees(carto.latitude)-f.lat)>0.0005||Math.abs(carto.height-f.lastH)>1;
+    if(moved||performance.now()>f.until)pendingGroundFix=null;
+    else{const g0=globe.getHeight(Cesium.Cartographic.fromDegrees(f.lon,f.lat));
+      if(g0!==undefined&&Math.abs(g0+f.above-carto.height)>0.5){  // 地形が細かくなって地表の標高が変わったら合わせ直す
+        const h=g0+f.above;setCamHeight(carto,h);carto.height=h;f.lastH=h;
+        if(f.first){f.first=false;
+          if(f.above>=H_MIN&&f.above<=H_MAX&&window.__setFollowHeight)window.__setFollowHeight(f.above);  // スライダーの範囲内ならスライダーも合わせる
+          else if(f.above<FOLLOW_ON){followSuppressed=true;followActive=false}}  // 100〜300mは追従で引き戻さない
+        scene.requestRender()}}}
   const g=globe.getHeight(carto);if(g!==undefined)lastGround=g;
   const above=lastGround==null?null:carto.height-lastGround;
   if(above!=null&&above>FOLLOW_ON+100){followSuppressed=false;followActive=false}
@@ -452,6 +479,7 @@ const mini=(()=>{
   el.addEventListener('pointermove',e=>{if(dragging){setFromY(e.clientY);e.preventDefault()}});
   const end=()=>{if(!dragging)return;dragging=false;try{localStorage.setItem('followH',followHeight)}catch(e){}};
   el.addEventListener('pointerup',end);el.addEventListener('pointercancel',end);
+  window.__setFollowHeight=h=>{followHeight=Math.max(H_MIN,Math.min(H_MAX,h<10?Math.round(h*10)/10:Math.round(h)));show();try{localStorage.setItem('followH',followHeight)}catch(e){}};
   show();
 })();
 // ===== ゲレンデのコース・リフト =====
@@ -666,8 +694,7 @@ const editor=EDIT?(function(){
     pushUndo();removeCourseFeature(editSel);courseGeo.features=courseGeo.features.filter(f=>f!==editSel);editSel=null;vSel=[];save();markers();info();scene.requestRender();mini.request()};
   $('eUndo').onclick=()=>{const u=undoStack.pop();if(!u)return;courseGeo=JSON.parse(u.geo);editSel=courseGeo.features.find(f=>f.properties.id===u.sel)||null;vSel=[];creating=null;merging=false;drawCourses();save();markers();info()};
   $('eExport').onclick=async()=>{const g=JSON.parse(JSON.stringify(courseGeo,(k,v)=>k.startsWith('__')?undefined:v)),txt=JSON.stringify(g);
-    try{await navigator.clipboard.writeText(txt);alert('GeoJSONをクリップボードにコピーしました（'+Math.round(txt.length/1024)+'KB）')}
-    catch(e){const ta=document.createElement('textarea');ta.value=txt;ta.style.cssText='position:fixed;left:0;top:0;width:1px;height:1px;opacity:0';document.body.appendChild(ta);ta.focus();ta.select();let ok=false;try{ok=document.execCommand('copy')}catch(_){}ta.remove();alert(ok?'GeoJSONをクリップボードにコピーしました':'コピーできませんでした')}};
+    alert(await copyText(txt)?'GeoJSONをクリップボードにコピーしました（'+Math.round(txt.length/1024)+'KB）':'コピーできませんでした')};
   $('eDiscard').onclick=()=>{if(!confirm('端末に保存した編集内容を破棄して元のデータに戻しますか？'))return;try{localStorage.removeItem(COURSE.keys.edit);localStorage.removeItem(COURSE.keys.oldEdit)}catch(e){}
     editSel=null;creating=null;vSel=[];undoStack.length=0;loadCourses().then(()=>{markers();info()})};
   $('eOsm').onclick=async()=>{if(courseGeo.features.length&&!confirm('今のコースデータを OpenStreetMap から作り直します（中心線は幅'+COURSE.width+'mのポリゴンに変換）。よろしいですか？'))return;
@@ -706,6 +733,15 @@ for(const t of ['gesturestart','gesturechange','gestureend'])document.addEventLi
   if(now-lastEnd<350&&!e.target.closest('button,input,label,a'))e.preventDefault();  // 素早い2回目のタップによる拡大を止める
   lastEnd=now},{passive:false});}
 document.addEventListener('dblclick',e=>e.preventDefault(),{passive:false});
+// ===== 初期視点の保存とコピー =====
+document.getElementById('viewSave').onclick=()=>{const c=camera.positionCartographic,g=globe.getHeight(c),ground=g!==undefined?g:lastGround;
+  const v={lon:+Cesium.Math.toDegrees(c.longitude).toFixed(6),lat:+Cesium.Math.toDegrees(c.latitude).toFixed(6),height:+c.height.toFixed(1),
+    heading:+Cesium.Math.toDegrees(camera.heading).toFixed(1),pitch:+Cesium.Math.toDegrees(camera.pitch).toFixed(1),aboveGround:ground!=null?+(c.height-ground).toFixed(1):null};
+  try{localStorage.setItem(VIEW_KEY,JSON.stringify(v));alert('現在の視点を初期位置に保存しました。次回はここから始まります（地表から約'+(v.aboveGround!=null?Math.round(v.aboveGround)+'m':'?')+'）')}
+  catch(e){alert('保存できませんでした（ブラウザの保存領域が使えません）')}};
+document.getElementById('viewCopy').onclick=async()=>{let v=null;try{v=JSON.parse(localStorage.getItem(VIEW_KEY)||'null')}catch(e){}
+  if(!v){alert('まだ初期視点が保存されていません。先に「現在の視点を初期位置にする」を押してください');return}
+  const txt=JSON.stringify(v);alert(await copyText(txt)?'初期視点をコピーしました。cesium/index.html の DEFAULT_VIEW に貼ると全端末で同じ初期視点になります\n'+txt:'コピーできませんでした：'+txt)};
 // ===== 「ゲレンデ向き」：本体カメラとミニマップを方位250度・既定の傾きに戻す（数値はSETTINGSで変更）=====
 document.getElementById('slope').onclick=()=>{
   const c=camera.positionCartographic;let h=c.height;
