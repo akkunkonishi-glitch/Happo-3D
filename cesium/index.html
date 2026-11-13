@@ -19,18 +19,25 @@ html,body,#cesium{margin:0;width:100%;height:100%;overflow:hidden;font-family:sy
 .cesium-viewer-bottom{font-size:10px}
 #mini{position:absolute;right:12px;bottom:34px;z-index:10;border-radius:12px;overflow:hidden;box-shadow:0 2px 12px #0005;background:#e8e8e0;touch-action:none;border:2px solid #fff}
 #mini canvas{display:block;touch-action:none}
+#hslider{position:absolute;right:14px;top:50%;margin-top:-170px;z-index:10;width:56px;height:250px;touch-action:none;user-select:none;-webkit-user-select:none}
+#hslider .cap{position:absolute;top:-2px;left:0;width:56px;text-align:center;font-size:11px;color:#fff;text-shadow:0 0 3px #000}
+#hslider .track{position:absolute;left:25px;top:22px;bottom:12px;width:6px;border-radius:3px;background:rgba(255,255,255,0.75);box-shadow:0 0 4px #0006}
+#hslider .tick{position:absolute;left:34px;font-size:9px;color:#fff;text-shadow:0 0 3px #000;margin-top:-6px}
+#hslider .thumb{position:absolute;left:16px;width:24px;height:24px;margin-top:-12px;border-radius:50%;background:#ff5a00;border:2px solid #fff;box-shadow:0 1px 4px #0008}
+#hslider .val{position:absolute;right:30px;top:3px;font-size:11px;font-weight:bold;background:#fffe;border-radius:6px;padding:1px 4px;white-space:nowrap}
 </style>
 </head>
 <body>
 <div id="cesium"></div>
 <div id="mini"><canvas id="miniCanvas"></canvas></div>
+<div id="hslider"><div class="cap">地表から</div><div class="track"></div><div class="thumb"><span class="val"></span></div></div>
 <div id="panel">
   <b>八方尾根 3D 管理マップ（Cesium版）</b>
   <div id="status">読み込み中…</div>
   <div><button id="top">真上から</button><button id="oblique">斜めから</button><button id="contour">等高線 ON</button><button id="slope">ゲレンデ向き</button></div>
   <div><button id="draw">ロープを描く</button><button id="undo">1点戻す</button><button id="clear">消去</button></div>
   <div id="total">ロープ距離: 0 m</div>
-  <div><label><input type="checkbox" id="followOn" checked>地表追従</label> 高さ <input id="followH" type="number" min="2" max="300" step="1">m</div>
+  <div><label><input type="checkbox" id="followOn" checked>地表追従</label>（高さは右端のスライダー）</div>
   <div id="follow"></div>
   <small>赤線：指定KML範囲。1本指：地面をつかんで移動（空なら向きを変える）。2本指：広げる＝ズーム／ひねる＝回転／上下＝傾き（地表近くでは見上げ・見下ろし）。右下のミニマップはドラッグで移動、ピンチで縮尺変更。</small>
   <a href="../">MapLibre版と比較する</a>
@@ -47,7 +54,11 @@ const LIMIT={west:137.3,south:36.0,east:138.2,north:36.9,maxHeight:60000};
 const limitRect=Cesium.Rectangle.fromDegrees(137.25,35.95,138.25,36.95);
 // ===== 設定（ここの数字を変えるだけで調整できます）=====
 const SETTINGS={
-  followHeight:20,   // 地表追従の既定の高さ(m)。画面の「高さ」欄でも変更できる
+  followHeight:20,   // 地表追従の既定の高さ(m)。画面右端のスライダーで2〜100mに変更できる
+  rotateSpeed:1.5,   // 2本指でひねったときの回転の感度(1=指と同じ角度)
+  tiltSpeed:0.009,   // 2本指上下の傾き・見上げの感度(1pxあたりのラジアン)
+  skyDragSpeed:0.006,// 空をドラッグしたときの向きの感度(1pxあたりのラジアン)
+  followSmoothing:0.6,// 地表追従で高さを合わせる速さ(0〜1、1で即座)
   resetHeading:250,  // 「ゲレンデ向き」ボタンの方位(度、北=0・東=90)
   resetPitch:-15,    // 「ゲレンデ向き」ボタンの傾き(度、マイナスで見下ろし、0で水平)
   resetHeight:20,    // 「ゲレンデ向き」ボタンでの地表からの高さ(m)。nullにすると今の高さのまま
@@ -216,10 +227,10 @@ document.getElementById('clear').onclick=()=>{rope=[];updateRope()};
 // ===== 地表追従カメラ =====
 // カメラが地表から300m以内に寄ると有効。カメラ直下の地表＋設定高さ(既定20m)を保ち、登りでは上げ、下りでは下げる。
 // ズームアウト操作で解除。地形が未読み込みの場所では前回の地表標高を使う。
-const FOLLOW_ON=300,hInput=document.getElementById('followH'),followOn=document.getElementById('followOn'),followEl=document.getElementById('follow');
-hInput.value=SETTINGS.followHeight;try{const v=localStorage.getItem('followH');if(v)hInput.value=v}catch(e){}
-const followH=()=>+hInput.value||SETTINGS.followHeight;
-hInput.onchange=()=>{const v=Math.max(2,Math.min(300,+hInput.value||SETTINGS.followHeight));hInput.value=v;try{localStorage.setItem('followH',v)}catch(e){};scene.requestRender()};
+const FOLLOW_ON=300,followOn=document.getElementById('followOn'),followEl=document.getElementById('follow');
+const H_MIN=2,H_MAX=100;let followHeight=SETTINGS.followHeight;
+try{const v=+localStorage.getItem('followH');if(v>=H_MIN&&v<=H_MAX)followHeight=v}catch(e){}
+const followH=()=>followHeight;
 followOn.onchange=()=>{followActive=false;scene.requestRender()};
 let followActive=false,followSuppressed=false,lastGround=null,lastInfo='';
 function releaseFollow(){if(followActive){followActive=false;followSuppressed=true}}
@@ -235,7 +246,7 @@ scene.preRender.addEventListener(()=>{
   if(above!=null&&above>FOLLOW_ON+100){followSuppressed=false;followActive=false}
   if(followOn.checked&&!followActive&&!followSuppressed&&above!=null&&above<FOLLOW_ON){followActive=true}
   if(followActive&&followOn.checked&&lastGround!=null){
-    const target=lastGround+followH(),k=carto.height<lastGround+2?0.6:0.25,next=carto.height+(target-carto.height)*k;
+    const target=lastGround+followH(),k=carto.height<lastGround+2?Math.max(0.8,SETTINGS.followSmoothing):SETTINGS.followSmoothing,next=carto.height+(target-carto.height)*k;
     if(Math.abs(next-carto.height)>0.02){setCamHeight(carto,next);scene.requestRender()}}
   const info=(followOn.checked?(followActive?'追従中':'地表から'+FOLLOW_ON+'m以内で追従'):'追従オフ')+(above!=null?'／地表から約'+Math.round(above)+'m':'');
   if(info!==lastInfo){followEl.textContent=info;lastInfo=info}});
@@ -246,7 +257,7 @@ scene.canvas.addEventListener('wheel',e=>{if(e.deltaY>0)releaseFollow()},{passiv
 // 傾きは、地表近く(500m以内)ではその場で見上げ・見下ろし（空も見られる）、高い所では注視点の周りで傾ける。
 ssc.zoomEventTypes=[Cesium.CameraEventType.WHEEL,Cesium.CameraEventType.RIGHT_DRAG];
 ssc.tiltEventTypes=[Cesium.CameraEventType.MIDDLE_DRAG,{eventType:Cesium.CameraEventType.LEFT_DRAG,modifier:Cesium.KeyboardEventModifier.CTRL},{eventType:Cesium.CameraEventType.RIGHT_DRAG,modifier:Cesium.KeyboardEventModifier.CTRL}];
-ssc.rotateEventTypes=[];  // 1本指ドラッグは下の「地面をつかむ」処理で行う
+ssc.rotateEventTypes=[];ssc.inertiaSpin=0;ssc.inertiaTranslate=0;ssc.inertiaZoom=0;  // 慣性なし：指を離したらすぐ止まる  // 1本指ドラッグは下の「地面をつかむ」処理で行う
 (function grabDrag(){
   // 1本指(マウス左)ドラッグ：指の下の地面をつかんで引っ張る。空をつかんだときは向き(方位・見上げ)を変える
   const el=scene.canvas,ptrs=new Map();let grab=null;
@@ -259,7 +270,7 @@ ssc.rotateEventTypes=[];  // 1本指ドラッグは下の「地面をつかむ�
     if(grab.P0){const ray=camera.getPickRay(new Cesium.Cartesian2(p.x,p.y)),hit=ray&&Cesium.IntersectionTests.rayPlane(ray,Cesium.Plane.fromPointNormal(grab.P0,grab.normal));
       if(hit&&Cesium.Cartesian3.distance(hit,camera.position)<40000){const d=Cesium.Cartesian3.subtract(grab.P0,hit,new Cesium.Cartesian3());
         camera.setView({destination:Cesium.Cartesian3.add(camera.position,d,new Cesium.Cartesian3()),orientation:{heading:camera.heading,pitch:camera.pitch,roll:0}})}}
-    else{const dx=p.x-grab.last.x,dy=p.y-grab.last.y;camera.setView({orientation:{heading:camera.heading-dx*0.003,pitch:Math.max(-Cesium.Math.PI_OVER_TWO+0.01,Math.min(Cesium.Math.toRadians(60),camera.pitch+dy*0.003)),roll:0}})}
+    else{const dx=p.x-grab.last.x,dy=p.y-grab.last.y;camera.setView({orientation:{heading:camera.heading-dx*SETTINGS.skyDragSpeed,pitch:Math.max(-Cesium.Math.PI_OVER_TWO+0.01,Math.min(Cesium.Math.toRadians(60),camera.pitch+dy*SETTINGS.skyDragSpeed)),roll:0}})}
     grab.last=p;scene.requestRender()});
   const up=e=>{ptrs.delete(e.pointerId);if(ptrs.size!==1)grab=null};
   el.addEventListener('pointerup',up);el.addEventListener('pointercancel',up);
@@ -278,20 +289,20 @@ ssc.rotateEventTypes=[];  // 1本指ドラッグは下の「地面をつかむ�
     if(!g.mode){
       const scale=Math.log2(q.d/g.sq.d);let rot=(q.ang-g.sq.ang)*180/Math.PI;rot=((rot+540)%360)-180;
       const dya=p[0].y-g.start[0].y,dyb=p[1].y-g.start[1].y,dx=(p[0].x-g.start[0].x+p[1].x-g.start[1].x)/2,dy=(dya+dyb)/2;
-      if(Math.abs(scale)>0.15)g.mode='zoom';else if(Math.abs(rot)>12)g.mode='rotate';
-      else if(dya*dyb>0&&Math.abs(dy)>18&&Math.abs(dy)>Math.abs(dx)*1.5&&Math.abs(scale)<0.08)g.mode=nearGround()?'look':'tilt';
+      if(Math.abs(scale)>0.1)g.mode='zoom';else if(Math.abs(rot)>7)g.mode='rotate';
+      else if(dya*dyb>0&&Math.abs(dy)>10&&Math.abs(dy)>Math.abs(dx)*1.3&&Math.abs(scale)<0.06)g.mode=nearGround()?'look':'tilt';
       else return;
       g.last=q;g.lastP=p;g.P=pick(q.c)||g.P;return}
     const P=g.P;
     if(g.mode==='zoom'&&P){const ratio=q.d/g.last.d;if(ratio<1)releaseFollow();
       const off=Cesium.Cartesian3.subtract(camera.position,P,new Cesium.Cartesian3());Cesium.Cartesian3.multiplyByScalar(off,1/ratio,off);
       camera.setView({destination:Cesium.Cartesian3.add(P,off,new Cesium.Cartesian3()),orientation:{heading:camera.heading,pitch:camera.pitch,roll:0}})}
-    else if(g.mode==='rotate'){let da=q.ang-g.last.ang;if(da>Math.PI)da-=2*Math.PI;if(da<-Math.PI)da+=2*Math.PI;
+    else if(g.mode==='rotate'){let da=q.ang-g.last.ang;if(da>Math.PI)da-=2*Math.PI;if(da<-Math.PI)da+=2*Math.PI;da*=SETTINGS.rotateSpeed;
       if(P&&camera.pitch<-0.1)orbit(P,()=>camera.rotate(Cesium.Cartesian3.UNIT_Z,-da));else camera.setView({orientation:{heading:camera.heading-da,pitch:camera.pitch,roll:0}})}  // 空を見ているときはその場で回す
-    else if(g.mode==='look'){const dy=q.c.y-g.last.c.y,np=Math.max(-Cesium.Math.PI_OVER_TWO+0.01,Math.min(Cesium.Math.toRadians(60),camera.pitch-dy*0.004));
+    else if(g.mode==='look'){const dy=q.c.y-g.last.c.y,np=Math.max(-Cesium.Math.PI_OVER_TWO+0.01,Math.min(Cesium.Math.toRadians(60),camera.pitch-dy*SETTINGS.tiltSpeed));
       camera.setView({orientation:{heading:camera.heading,pitch:np,roll:0}})}
     else if(g.mode==='tilt'&&P){const dy=q.c.y-g.last.c.y;
-      orbit(P,()=>camera.rotateDown(dy*0.004));if(camera.pitch>-0.05)orbit(P,()=>camera.rotateDown(-dy*0.004))}  // 水平より上には回り込まない
+      orbit(P,()=>camera.rotateDown(dy*SETTINGS.tiltSpeed));if(camera.pitch>-0.05)orbit(P,()=>camera.rotateDown(-dy*SETTINGS.tiltSpeed))}  // 水平より上には回り込まない
     g.last=q;g.lastP=p;scene.requestRender()},{passive:false});
   const end=e=>{if(e.touches.length<2)g=null};
   el.addEventListener('touchend',end,{passive:true});el.addEventListener('touchcancel',end,{passive:true});
@@ -330,7 +341,7 @@ const mini=(()=>{
     ctx.rotate(-hd);ctx.beginPath();ctx.moveTo(0,-11);ctx.lineTo(5,3);ctx.lineTo(0,0);ctx.lineTo(-5,3);ctx.closePath();ctx.fillStyle='#d32f2f';ctx.fill();
     ctx.fillStyle='#333';ctx.font='bold 9px sans-serif';ctx.textAlign='center';ctx.fillText('N',0,12);ctx.restore()}
   function request(){if(!pending){pending=true;requestAnimationFrame(draw)}}
-  scene.postRender.addEventListener(request);
+  scene.postRender.addEventListener(()=>draw());  // 本体の描画と同じフレームで描く（遅延なし）
   // 操作：1本指ドラッグ＝カメラ水平移動（地図は指と一緒に動く）、2本指ピンチ＝縮尺
   const ptrs=new Map();let pinch0=null;
   cv.addEventListener('pointerdown',e=>{cv.setPointerCapture(e.pointerId);ptrs.set(e.pointerId,{x:e.clientX,y:e.clientY});pinch0=null;e.preventDefault()});
@@ -349,6 +360,25 @@ const mini=(()=>{
   cv.addEventListener('pointerup',up);cv.addEventListener('pointercancel',up);
   cv.addEventListener('wheel',e=>{e.preventDefault();zoom=Math.max(10,Math.min(18.5,zoom-e.deltaY*0.002));request()},{passive:false});
   return {request,setZoom:z=>{zoom=z;request()},get zoom(){return zoom}};
+})();
+// ===== 地表からの高さスライダー（右端・2〜100m・対数で低い側が細かい）=====
+// ドラッグ中はリアルタイムでカメラ高度(地表＋値)に反映する。
+(function heightSlider(){
+  const el=document.getElementById('hslider'),track=el.querySelector('.track'),thumb=el.querySelector('.thumb'),val=el.querySelector('.val');
+  const L=Math.log(H_MAX/H_MIN),top=()=>track.offsetTop,len=()=>track.offsetHeight;
+  for(const t of [2,5,10,20,50,100]){const d=document.createElement('div');d.className='tick';d.textContent=t;d.style.top=(top()+(1-Math.log(t/H_MIN)/L)*len())+'px';el.appendChild(d)}
+  function show(){thumb.style.top=(top()+(1-Math.log(followHeight/H_MIN)/L)*len())+'px';val.textContent=(followHeight<10?followHeight.toFixed(1):Math.round(followHeight))+'m'}
+  function apply(){const c=camera.positionCartographic,g=globe.getHeight(c),ground=g!==undefined?g:lastGround;
+    if(ground!=null){camera.setView({destination:Cesium.Cartesian3.fromRadians(c.longitude,c.latitude,ground+followHeight),orientation:{heading:camera.heading,pitch:camera.pitch,roll:0}});followActive=followOn.checked;followSuppressed=false}
+    scene.requestRender()}
+  function setFromY(clientY){const r=el.getBoundingClientRect(),t=1-Math.min(1,Math.max(0,(clientY-r.top-top())/len()));
+    let h=H_MIN*Math.exp(t*L);h=h<10?Math.round(h*10)/10:Math.round(h);followHeight=h;show();apply()}
+  let dragging=false;
+  el.addEventListener('pointerdown',e=>{dragging=true;el.setPointerCapture(e.pointerId);setFromY(e.clientY);e.preventDefault()});
+  el.addEventListener('pointermove',e=>{if(dragging){setFromY(e.clientY);e.preventDefault()}});
+  const end=()=>{if(!dragging)return;dragging=false;try{localStorage.setItem('followH',followHeight)}catch(e){}};
+  el.addEventListener('pointerup',end);el.addEventListener('pointercancel',end);
+  show();
 })();
 // ===== 「ゲレンデ向き」：本体カメラとミニマップを方位250度・既定の傾きに戻す（数値はSETTINGSで変更）=====
 document.getElementById('slope').onclick=()=>{
