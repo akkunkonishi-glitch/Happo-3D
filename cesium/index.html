@@ -21,6 +21,8 @@ html,body{touch-action:manipulation;-webkit-text-size-adjust:100%}  /* ダブル
 #courseRow{font-size:12px;margin-top:4px;padding-top:4px;border-top:1px solid #ddd}
 #courseRow input[type=range]{width:80px;vertical-align:middle;touch-action:pan-x}
 #courseInfo{font-size:11px;color:#555}
+#courseStatus{font-size:10.5px;color:#444;line-height:1.35;max-height:110px;overflow-y:auto;touch-action:pan-y;white-space:pre-wrap}
+#courseStatus .ng{color:#c62828}#courseStatus .ok{color:#2e7d32}
 #editRow{margin-top:4px;padding:5px;border-radius:8px;background:#fff1e0;font-size:12px}
 #editRow .ei{margin:2px 0;color:#7a3d00}
 #ropeList{max-height:170px;overflow-y:auto;touch-action:pan-y;-webkit-overflow-scrolling:touch;margin-top:4px;border-top:1px solid #ddd}
@@ -55,7 +57,7 @@ html,body{touch-action:manipulation;-webkit-text-size-adjust:100%}  /* ダブル
   <b>八方尾根 3D 管理マップ（Cesium版）</b>
   <div id="status">読み込み中…</div>
   <div><button id="top">真上から</button><button id="oblique">斜めから</button><button id="contour">等高線 ON</button><button id="slope">ゲレンデ向き</button></div>
-  <div id="courseRow"><label><input type="checkbox" id="courseOn" checked>コース</label> 透明度 <input type="range" id="courseAlpha" min="0.1" max="0.9" step="0.05" value="0.45"><div id="courseInfo">コース読み込み中…</div></div>
+  <div id="courseRow"><label><input type="checkbox" id="courseOn" checked>コース</label> 透明度 <input type="range" id="courseAlpha" min="0.1" max="0.9" step="0.05" value="0.45"><div id="courseInfo">コース読み込み中…</div><div id="courseStatus"></div><button id="courseRetry" style="display:none">再取得</button></div>
   <div><button id="newRope">新しいロープ</button><button id="draw">点を打つ</button><button id="undo">1点戻す</button></div>
   <div id="ropeList"></div>
   <div id="total">合計: 0 m</div>
@@ -455,7 +457,9 @@ const mini=(()=>{
 // 編集モード(?edit=1)では、端末に保存した編集中データを最優先で読む。
 const COURSE={fill:'#8cecff',file:'data/courses.geojson',width:30,bbox:[36.655,137.76,36.735,137.87],
   keys:{edit:'happoCoursesEdit',auto:'happoCoursesAuto',oldOsm:'happoCoursesGeo',oldEdit:'happoCoursesEdited'},
-  overpass:['https://overpass-api.de/api/interpreter','https://overpass.kumi.systems/api/interpreter','https://overpass.private.coffee/api/interpreter']};
+  timeoutMs:30000,  // ミラー1か所あたりの待ち時間
+  overpass:['https://overpass-api.de/api/interpreter','https://lz4.overpass-api.de/api/interpreter','https://z.overpass-api.de/api/interpreter',
+    'https://overpass.kumi.systems/api/interpreter','https://maps.mail.ru/osm/tools/overpass/api/interpreter','https://overpass.private.coffee/api/interpreter']};
 try{viewer.creditDisplay.addStaticCredit(new Cesium.Credit('コース・リフト © OpenStreetMap contributors'))}catch(e){}
 const courseSrc=new Cesium.CustomDataSource('courses');viewer.dataSources.add(courseSrc);
 let courseAlpha=0.45;const courseMats=new Map();
@@ -484,23 +488,50 @@ function drawCourses(){
 const courseCounts=()=>{const f=courseGeo.features;return 'コース'+f.filter(isCourse).length+'・リフト'+f.filter(x=>x.properties.kind==='lift').length};
 const lsGet=k=>{try{const v=localStorage.getItem(k);return v?JSON.parse(v):null}catch(e){return null}};
 const lsSet=(k,v)=>{try{localStorage.setItem(k,JSON.stringify(v));return true}catch(e){return false}};
+// 取得状況を画面に1行ずつ表示（成功=緑、失敗=赤）
+const courseLog={lines:[],add(text,cls){this.lines.push({text,cls});this.render()},clear(){this.lines=[];this.render()},
+  render(){const el=document.getElementById('courseStatus');el.textContent='';for(const l of this.lines){const d=document.createElement('div');d.textContent=l.text;if(l.cls)d.className=l.cls;el.appendChild(d)}el.scrollTop=el.scrollHeight}};
+function whyFailed(e){const m=String(e&&e.message||e);
+  if(e&&e.name==='AbortError')return 'タイムアウト（'+COURSE.timeoutMs/1000+'秒）';
+  if(/HTTP 429/.test(m))return 'HTTP 429：混雑・回数制限中';if(/HTTP 504|HTTP 503|HTTP 502/.test(m))return m+'：サーバー過負荷';
+  if(/^HTTP/.test(m))return m;if(/Load failed|Failed to fetch|NetworkError|TypeError/i.test(m))return '接続できない（通信エラー、またはCORSで拒否）';
+  return m}
 async function fetchOsmCourses(){
   const [s_,w_,n_,e_]=COURSE.bbox,b=s_+','+w_+','+n_+','+e_,q='[out:json][timeout:60];(way["piste:type"="downhill"]('+b+');relation["piste:type"="downhill"]('+b+');way["aerialway"]('+b+'););out geom;';
-  let err;for(const url of COURSE.overpass){try{const r=await fetch(url,{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:'data='+encodeURIComponent(q)});if(!r.ok)throw new Error('HTTP '+r.status);return HappoCourses.osmToCourses(await r.json(),{width:COURSE.width})}catch(x){err=x}}
-  throw err}
+  for(const url of COURSE.overpass){const host=new URL(url).host,ac=new AbortController(),t=setTimeout(()=>ac.abort(),COURSE.timeoutMs),t0=performance.now();
+    courseLog.add('… '+host+' に問い合わせ中');
+    try{const r=await fetch(url,{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:'data='+encodeURIComponent(q),signal:ac.signal});
+      if(!r.ok)throw new Error('HTTP '+r.status);
+      let osm;try{osm=await r.json()}catch(x){throw new Error('応答がJSONではない（サーバーのエラーページ）')}
+      const geo=HappoCourses.osmToCourses(osm,{width:COURSE.width}),nc=geo.features.filter(isCourse).length;
+      courseLog.lines.pop();
+      if(!nc){courseLog.add('✗ '+host+'：該当するコースが0件（データ要素'+(osm.elements||[]).length+'件）','ng');continue}
+      courseLog.add('✓ '+host+'：コース'+nc+'件を取得（'+Math.round(performance.now()-t0)+'ms）','ok');return geo}
+    catch(e){courseLog.lines.pop();courseLog.add('✗ '+host+'：'+whyFailed(e),'ng')}
+    finally{clearTimeout(t)}}
+  throw new Error('すべてのOverpassミラーで取得できませんでした')}
 async function loadCourses(){
-  const info=document.getElementById('courseInfo'),norm=g=>HappoCourses.normalizeCourses(g,{width:COURSE.width});
-  const use=(g,src)=>{courseGeo=norm(g);drawCourses();info.textContent=courseCounts()+'（'+src+'）';return true};
-  if(EDIT){const v=lsGet(COURSE.keys.edit);if(v&&use(v,'端末で編集中のデータ'))return;
-    const old=lsGet(COURSE.keys.oldEdit);if(old&&use(old,'旧バージョンの編集を引き継ぎ'))return}
-  try{const r=await fetch(COURSE.file,{cache:'no-cache'});if(r.ok){use(await r.json(),'courses.geojson');return}}catch(e){}
-  // courses.geojson がまだ無いときの代わり：端末に残っているOSMデータ → ブラウザからOSM取得（いずれも幅30mでポリゴン化）
+  const info=document.getElementById('courseInfo'),retry=document.getElementById('courseRetry'),norm=g=>HappoCourses.normalizeCourses(g,{width:COURSE.width});
+  courseLog.clear();retry.style.display='none';
+  const nCourses=g=>g.features.filter(isCourse).length;
+  // コースが1件以上あるデータだけ採用（空のデータは無視して次の候補へ）
+  const tryUse=(g,label,src)=>{if(!g){courseLog.add('・'+label+'：なし');return false}let n;try{g=norm(g);n=nCourses(g)}catch(e){courseLog.add('✗ '+label+'：読めない（'+e.message+'）','ng');return false}
+    if(!n){courseLog.add('・'+label+'：コース0件のため使わない');return false}
+    courseGeo=g;drawCourses();info.textContent=courseCounts()+'（'+src+'）';courseLog.add('✓ '+label+'：コース'+n+'件を表示','ok');return true};
+  if(EDIT){if(tryUse(lsGet(COURSE.keys.edit),'端末の編集中データ','端末で編集中のデータ'))return;
+    if(tryUse(lsGet(COURSE.keys.oldEdit),'旧バージョンの編集データ','旧バージョンの編集を引き継ぎ'))return}
+  try{const r=await fetch(COURSE.file,{cache:'no-cache'});
+    if(r.ok){let g=null;try{g=await r.json()}catch(e){courseLog.add('✗ courses.geojson：JSONとして読めない','ng')}if(g&&tryUse(g,'courses.geojson','courses.geojson'))return}
+    else courseLog.add('・courses.geojson：まだ無い（HTTP '+r.status+'）')}
+  catch(e){courseLog.add('✗ courses.geojson：'+whyFailed(e),'ng')}
   const note='courses.geojson 未作成のためOSMから自動生成';
-  const auto=lsGet(COURSE.keys.auto);if(auto&&use(auto,note+'・端末に一時保存'))return;
-  const oldOsm=lsGet(COURSE.keys.oldOsm);if(oldOsm){use(oldOsm,note+'・旧データから変換');lsSet(COURSE.keys.auto,courseGeo);return}
-  info.textContent='courses.geojson が無いため OpenStreetMap から取得中…';
-  try{use(await fetchOsmCourses(),note);lsSet(COURSE.keys.auto,courseGeo)}
-  catch(e){courseGeo={type:'FeatureCollection',properties:{},features:[]};drawCourses();info.textContent='コースを読み込めませんでした（courses.geojson が無く、OSMにも接続できません）'}}
+  if(tryUse(lsGet(COURSE.keys.auto),'端末に一時保存したOSMデータ',note+'・端末に一時保存'))return;
+  if(tryUse(lsGet(COURSE.keys.oldOsm),'旧バージョンのOSMデータ',note+'・旧データから変換')){lsSet(COURSE.keys.auto,courseGeo);return}
+  info.textContent='OpenStreetMapから取得中…（ミラーを順番に試します）';
+  try{const g=await fetchOsmCourses();courseGeo=g;drawCourses();info.textContent=courseCounts()+'（'+note+'）';lsSet(COURSE.keys.auto,courseGeo)}
+  catch(e){courseGeo={type:'FeatureCollection',properties:{},features:[]};drawCourses();
+    info.textContent='コースを表示できません：courses.geojson が無く、OpenStreetMapからも取得できませんでした。理由は下の一覧を見てください';retry.style.display=''}}
+document.getElementById('courseRetry').onclick=()=>{try{localStorage.removeItem(COURSE.keys.auto)}catch(e){}loadCourses()};
 document.getElementById('courseOn').onchange=e=>{courseSrc.show=e.target.checked;scene.requestRender();mini.request()};
 document.getElementById('courseAlpha').oninput=e=>{courseAlpha=+e.target.value;for(const m of courseMats.values()){const c=m.base;m.fill.color=c.withAlpha(courseAlpha);m.edge.color=new Cesium.Color(c.red*0.45,c.green*0.55,c.blue*0.6,Math.min(1,courseAlpha*1.6+0.2))}scene.requestRender()};
 // ミニマップにもコース（各色）・リフト(白)を表示（選択中はオレンジ）
@@ -637,7 +668,7 @@ const editor=EDIT?(function(){
   $('eDiscard').onclick=()=>{if(!confirm('端末に保存した編集内容を破棄して元のデータに戻しますか？'))return;try{localStorage.removeItem(COURSE.keys.edit);localStorage.removeItem(COURSE.keys.oldEdit)}catch(e){}
     editSel=null;creating=null;vSel=[];undoStack.length=0;loadCourses().then(()=>{markers();info()})};
   $('eOsm').onclick=async()=>{if(courseGeo.features.length&&!confirm('今のコースデータを OpenStreetMap から作り直します（中心線は幅'+COURSE.width+'mのポリゴンに変換）。よろしいですか？'))return;
-    infoEl.textContent='OpenStreetMapから取得中…';
+    infoEl.textContent='OpenStreetMapから取得中…（取得状況はコース欄に表示）';courseLog.clear();
     try{const g=await fetchOsmCourses();pushUndo();courseGeo=g;editSel=null;vSel=[];drawCourses();save();markers();info()}catch(e){alert('取得できませんでした：'+(e&&e.message||e));info()}};
   info();
   return {markers,info};
