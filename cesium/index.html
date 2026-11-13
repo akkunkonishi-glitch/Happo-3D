@@ -28,6 +28,12 @@ input:not([type=range]):not([type=checkbox]):not([type=color]):not([type=button]
 #courseStatus .ng{color:#c62828}#courseStatus .ok{color:#2e7d32}
 #editRow{margin-top:4px;padding:5px;border-radius:8px;background:#fff1e0;font-size:12px}
 #editRow .ei{margin:2px 0;color:#7a3d00}
+#courseMenu{position:absolute;z-index:20;display:none;background:#fffffff2;border-radius:10px;box-shadow:0 3px 14px #0005;padding:6px;touch-action:none}
+#courseMenu .t{font-size:12px;font-weight:bold;margin:0 4px 4px;max-width:170px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+#courseMenu button{display:block;width:100%;text-align:left;padding:8px 12px;margin:2px 0;border:1px solid #ccc;border-radius:7px;background:#fff;font-size:14px}
+#courseMenu button.danger{color:#c62828}
+#moveBanner{position:absolute;z-index:20;top:12px;left:50%;transform:translateX(-50%);display:none;background:#ff9800;color:#fff;border-radius:10px;padding:8px 12px;font-size:14px;box-shadow:0 3px 12px #0005;touch-action:none}
+#moveBanner button{margin-left:8px;padding:6px 12px;border-radius:7px;border:0;background:#fff;color:#e65100;font-weight:bold;font-size:14px}
 #ropeList{max-height:170px;overflow-y:auto;touch-action:pan-y;-webkit-overflow-scrolling:touch;margin-top:4px;border-top:1px solid #ddd}
 .rrow{display:flex;align-items:center;gap:4px;padding:3px 2px;border-bottom:1px solid #eee;font-size:12px}
 .rrow.sel{background:#fff4d6}
@@ -504,7 +510,7 @@ const courseRing=ft=>ft.geometry.coordinates[0];
 function addCourseFeature(ft){
   const out=[],add=o=>{out.push(courseSrc.entities.add(o))},deg=c=>Cesium.Cartesian3.fromDegreesArray(c.flat());
   if(isCourse(ft)){const sel=ft===editSel,rings=ft.geometry.coordinates,m=matsFor(ft.properties.color);
-    add({polygon:{hierarchy:new Cesium.PolygonHierarchy(deg(rings[0]),rings.slice(1).map(h=>new Cesium.PolygonHierarchy(deg(h)))),material:m.fill,classificationType:Cesium.ClassificationType.TERRAIN}});
+    add({polygon:{hierarchy:new Cesium.PolygonHierarchy(deg(rings[0]),rings.slice(1).map(h=>new Cesium.PolygonHierarchy(deg(h)))),material:sel?Cesium.Color.fromCssColorString('#ff9800').withAlpha(0.5):m.fill,classificationType:Cesium.ClassificationType.TERRAIN}});
     for(const r of rings)add({polyline:{positions:deg(r),width:sel?3.5:2,material:sel?Cesium.Color.fromCssColorString('#ff6d00'):m.edge,clampToGround:true}})}
   else if(ft.properties.kind==='lift'&&ft.geometry.coordinates.length>=2){const c=ft.geometry.coordinates,mid=c[Math.floor(c.length/2)];
     add({polyline:{positions:deg(c),width:3,material:new Cesium.PolylineOutlineMaterialProperty({color:Cesium.Color.WHITE,outlineColor:Cesium.Color.fromCssColorString('#333'),outlineWidth:1}),clampToGround:true}});
@@ -608,7 +614,8 @@ const editor=EDIT?(function(){
     for(let i=0;i<r.length-1;i++){const a=toM(r[i],h.ll),b=toM(r[i+1],h.ll),dx=b[0]-a[0],dy=b[1]-a[1],L=dx*dx+dy*dy,t=L?Math.max(0,Math.min(1,-(a[0]*dx+a[1]*dy)/L)):0,d=Math.hypot(a[0]+t*dx,a[1]+t*dy);
       if(d<bd){bd=d;best={i,t}}}
     if(!best)return null;const a=r[best.i],b=r[best.i+1];return {i:best.i,ll:[+(a[0]+(b[0]-a[0])*best.t).toFixed(7),+(a[1]+(b[1]-a[1])*best.t).toFixed(7)]}}
-  window.__editHit=(x,y)=>!creating&&!!editSel&&nearestVertex(x,y,24)>=0;  // 頂点をつかんだときだけ地図の移動を止める
+  let moveMode=false,moveDrag=null;  // コース全体の平行移動
+  window.__editHit=(x,y)=>(moveMode&&!!editSel)||(!creating&&!!editSel&&nearestVertex(x,y,24)>=0);  // 頂点をつかんだとき・移動中は地図を動かさない
   // --- 表示 ---
   const pt=(q,size,color,outline)=>({position:Cesium.Cartesian3.fromDegrees(q[0],q[1]),point:{pixelSize:size,color,outlineColor:outline||Cesium.Color.WHITE,outlineWidth:2,heightReference:Cesium.HeightReference.CLAMP_TO_GROUND,disableDepthTestDistance:Number.POSITIVE_INFINITY}});
   function markers(){mk.entities.suspendEvents();mk.entities.removeAll();
@@ -627,9 +634,10 @@ const editor=EDIT?(function(){
     if(editSel)$('eColor').value=editSel.properties.color||COURSE.fill;
     infoEl.textContent=msg||(creating?'新規コース：地面をタップして頂点を打つ（'+creating.length+'点、3点以上で「確定」）':
       merging?'結合：隣のコースをタップしてください（取り消すにはもう一度「結合」）':
+      moveMode?'移動中：ドラッグでコース全体を動かす（上の「移動終了」で確定）':
       editSel?'選択中：'+(editSel.properties.name||'名前なし')+'（頂点'+verts().length+(vSel.length?'・選択頂点'+vSel.length:'')+'）　ドラッグ＝移動／辺タップ＝追加／長押し＝削除／頂点タップ＝選ぶ':
       'コースをタップして選択。頂点以外のドラッグは地図の移動');msg=''}
-  function select(ft){const old=editSel;editSel=ft;vSel=[];merging=false;if(old)redrawFeature(old);if(ft)redrawFeature(ft);markers();info()}
+  function select(ft){const old=editSel;editSel=ft;vSel=[];merging=false;if(old!==ft)setMoveMode(false);if(!ft)hideMenu();if(old)redrawFeature(old);if(ft)redrawFeature(ft);markers();info()}
   function live(){if(!raf)raf=requestAnimationFrame(()=>{raf=0;redrawFeature(editSel);markers()})}
   // --- 頂点の操作 ---
   function setV(i,ll){const r=courseRing(editSel);r[i]=ll;if(i===0)r[r.length-1]=ll.slice()}
@@ -643,7 +651,8 @@ const editor=EDIT?(function(){
     if(editSel){const v=nearestVertex(x,y,14);  // タップは頂点の近く(14px)だけ頂点扱い。少し離れた辺のタップは頂点追加にする
       if(v>=0){vSel=vSel.includes(v)?vSel.filter(i=>i!==v):[...vSel.slice(-1),v];markers();info();return}  // 頂点を選ぶ（最大2つ）
       const e=nearestEdge(x,y,18);if(e){pushUndo();courseRing(editSel).splice(e.i+1,0,e.ll);vSel=[];changed(editSel);return}}  // 辺をタップ→頂点追加
-    select(courseAt(pickLL(x,y)))}
+    if(moveMode)return;  // 移動中のタップは無視
+    const ft=courseAt(pickLL(x,y));select(ft);if(ft)showMenu(x,y)}
   // --- 分割：選んだ頂点の位置でコースを切る ---
   $('eSplit').onclick=()=>{if(!editSel)return;const v=verts(),n=v.length;if(!vSel.length){alert('分割する位置の頂点をタップして選んでください（2つ選ぶとその2点を結ぶ線で切ります）');return}
     let a=vSel[0],b=vSel[1];
@@ -667,16 +676,41 @@ const editor=EDIT?(function(){
   el.addEventListener('pointerdown',e=>{ptrs.add(e.pointerId);
     if(ptrs.size>1){if(drag){clearTimeout(lp);drag=null;markers()}down=null;return}
     if(drawing||(e.pointerType==='mouse'&&e.button!==0))return;  // ロープの点打ち中はそちらを優先
-    const [x,y]=loc(e);down={id:e.pointerId,x,y,t:e.timeStamp,moved:false};
+    const [x,y]=loc(e);down={id:e.pointerId,x,y,t:e.timeStamp,moved:false};hideMenu();
+    if(moveMode&&editSel){const ll=pickLL(x,y);if(ll)moveDrag={start:ll,orig:JSON.parse(JSON.stringify(editSel.geometry.coordinates)),moved:false};return}
     if(!creating&&editSel){const i=nearestVertex(x,y,24);if(i>=0){drag={i,t0:e.timeStamp,moved:false,armed:false};lp=setTimeout(()=>{if(drag&&!drag.moved){drag.armed=true;markers()}},600);markers()}}});
   el.addEventListener('pointermove',e=>{if(!down||e.pointerId!==down.id||ptrs.size>1)return;const [x,y]=loc(e);
     if(Math.hypot(x-down.x,y-down.y)>6)down.moved=true;
+    if(moveDrag){if(!down.moved)return;const ll=pickLL(x,y);if(!ll)return;if(!moveDrag.moved){moveDrag.moved=true;pushUndo()}
+      const dx=ll[0]-moveDrag.start[0],dy=ll[1]-moveDrag.start[1];  // 指の下の地面の移動量だけ全頂点を動かす
+      editSel.geometry.coordinates=moveDrag.orig.map(r=>r.map(q=>[+(q[0]+dx).toFixed(7),+(q[1]+dy).toFixed(7)]));live();return}
     if(drag&&down.moved){if(!drag.moved){drag.moved=true;clearTimeout(lp);pushUndo()}const ll=pickLL(x,y);if(ll){setV(drag.i,ll);live()}}});  // 地形に沿って移動
   el.addEventListener('pointerup',e=>{ptrs.delete(e.pointerId);if(!down||e.pointerId!==down.id)return;const [x,y]=loc(e);
+    if(moveDrag){if(moveDrag.moved){save();info()}moveDrag=null;down=null;return}
     if(drag){clearTimeout(lp);if(drag.moved){save();info()}else if(e.timeStamp-drag.t0>=600)delV(drag.i);else tap(x,y);drag=null;markers();down=null;return}
     if(!down.moved&&e.timeStamp-down.t<500)tap(x,y);  // 指が実際に触れていた時間で判定
     down=null});
-  el.addEventListener('pointercancel',e=>{ptrs.delete(e.pointerId);clearTimeout(lp);drag=null;down=null;markers()});
+  el.addEventListener('pointercancel',e=>{ptrs.delete(e.pointerId);clearTimeout(lp);drag=null;down=null;if(moveDrag&&moveDrag.moved)save();moveDrag=null;markers()});
+  // --- コース単位のメニュー（コースをタップすると出る）：平行移動／複製／名前変更／削除 ---
+  const menu=document.createElement('div');menu.id='courseMenu';
+  menu.innerHTML='<div class="t"></div><button data-a="move">コース全体を移動</button><button data-a="dup">複製</button><button data-a="rename">名前変更</button><button data-a="del" class="danger">削除</button><button data-a="close">閉じる</button>';
+  document.body.appendChild(menu);
+  const banner=document.createElement('div');banner.id='moveBanner';banner.innerHTML='移動中：ドラッグで動かす<button>移動終了</button>';document.body.appendChild(banner);
+  function showMenu(x,y){if(!editSel)return;menu.querySelector('.t').textContent=editSel.properties.name||'名前なし';menu.style.display='block';
+    const r=el.getBoundingClientRect(),w=menu.offsetWidth,h=menu.offsetHeight;
+    menu.style.left=Math.max(8,Math.min(r.left+x+14,window.innerWidth-w-8))+'px';menu.style.top=Math.max(8,Math.min(r.top+y-h/2,window.innerHeight-h-8))+'px'}
+  function hideMenu(){menu.style.display='none'}
+  function setMoveMode(on){moveMode=!!on&&!!editSel;moveDrag=null;banner.style.display=moveMode?'block':'none';info()}
+  banner.querySelector('button').onclick=()=>{setMoveMode(false);msg='移動を確定しました';info()};
+  function renameSel(){if(!editSel)return;const v=prompt('コース名',editSel.properties.name||'');if(v!=null){pushUndo();editSel.properties.name=v.trim().slice(0,60);save();info()}}
+  function deleteSel(){if(!editSel||!confirm('「'+(editSel.properties.name||'名前なし')+'」を削除しますか？\nこの操作は「元に戻す」で取り消せます'))return;
+    pushUndo();setMoveMode(false);hideMenu();removeCourseFeature(editSel);courseGeo.features=courseGeo.features.filter(f=>f!==editSel);editSel=null;vSel=[];save();markers();info();scene.requestRender();mini.request()}
+  function duplicateSel(){if(!editSel)return;pushUndo();const c=JSON.parse(JSON.stringify(editSel,(k,v)=>k.startsWith('__')?undefined:v));
+    c.properties.id='copy/'+Date.now().toString(36);c.properties.name=(editSel.properties.name||'コース')+'（コピー）';c.properties.source='manual';
+    c.geometry.coordinates=c.geometry.coordinates.map(r=>r.map(q=>[+(q[0]+0.0003).toFixed(7),+(q[1]-0.0002).toFixed(7)]));  // 元と重ならないよう南東へ約30mずらす
+    courseGeo.features.splice(courseGeo.features.indexOf(editSel)+1,0,c);addCourseFeature(c);save();select(c);msg='複製しました（「コース全体を移動」で位置を合わせられます）';info()}
+  menu.addEventListener('click',e=>{const a=e.target.dataset&&e.target.dataset.a;if(!a)return;hideMenu();
+    if(a==='move')setMoveMode(true);else if(a==='dup')duplicateSel();else if(a==='rename')renameSel();else if(a==='del')deleteSel()});
   // --- ボタン ---
   $('eNew').onclick=()=>{select(null);creating=[];markers();info()};
   $('eCancel').onclick=()=>{creating=null;markers();info()};
@@ -686,20 +720,19 @@ const editor=EDIT?(function(){
     const ft={type:'Feature',properties:{id:'manual/'+Date.now().toString(36),kind:'course',name:'新規コース'+n,difficulty:'',source:'manual'},geometry:{type:'Polygon',coordinates:[ring]}};
     creating=null;courseGeo.features.push(ft);addCourseFeature(ft);save();select(ft)};
   $('eDeselect').onclick=()=>select(null);
-  $('eRename').onclick=()=>{if(!editSel)return;const v=prompt('コース名',editSel.properties.name||'');if(v!=null){pushUndo();editSel.properties.name=v.trim().slice(0,60);save();info()}};
+  $('eRename').onclick=()=>renameSel();
   $('eColor').oninput=e=>{if(!editSel)return;if(!editSel.__colorUndo){pushUndo();editSel.__colorUndo=true}editSel.properties.color=e.target.value;redrawFeature(editSel);save()};
   $('eColor').onchange=()=>{if(editSel)delete editSel.__colorUndo;info()};
   $('eColorReset').onclick=()=>{if(!editSel||!editSel.properties.color)return;pushUndo();delete editSel.properties.color;changed(editSel)};
-  $('eDelete').onclick=()=>{if(!editSel||!confirm('「'+(editSel.properties.name||'名前なし')+'」を削除しますか？'))return;
-    pushUndo();removeCourseFeature(editSel);courseGeo.features=courseGeo.features.filter(f=>f!==editSel);editSel=null;vSel=[];save();markers();info();scene.requestRender();mini.request()};
-  $('eUndo').onclick=()=>{const u=undoStack.pop();if(!u)return;courseGeo=JSON.parse(u.geo);editSel=courseGeo.features.find(f=>f.properties.id===u.sel)||null;vSel=[];creating=null;merging=false;drawCourses();save();markers();info()};
+  $('eDelete').onclick=()=>deleteSel();
+  $('eUndo').onclick=()=>{const u=undoStack.pop();if(!u)return;courseGeo=JSON.parse(u.geo);editSel=courseGeo.features.find(f=>f.properties.id===u.sel)||null;vSel=[];creating=null;merging=false;setMoveMode(false);hideMenu();drawCourses();save();markers();info()};
   $('eExport').onclick=async()=>{const g=JSON.parse(JSON.stringify(courseGeo,(k,v)=>k.startsWith('__')?undefined:v)),txt=JSON.stringify(g);
     alert(await copyText(txt)?'GeoJSONをクリップボードにコピーしました（'+Math.round(txt.length/1024)+'KB）':'コピーできませんでした')};
   $('eDiscard').onclick=()=>{if(!confirm('端末に保存した編集内容を破棄して元のデータに戻しますか？'))return;try{localStorage.removeItem(COURSE.keys.edit);localStorage.removeItem(COURSE.keys.oldEdit)}catch(e){}
-    editSel=null;creating=null;vSel=[];undoStack.length=0;loadCourses().then(()=>{markers();info()})};
+    editSel=null;creating=null;vSel=[];undoStack.length=0;setMoveMode(false);hideMenu();loadCourses().then(()=>{markers();info()})};
   $('eOsm').onclick=async()=>{if(courseGeo.features.length&&!confirm('今のコースデータを OpenStreetMap から作り直します（中心線は幅'+COURSE.width+'mのポリゴンに変換）。よろしいですか？'))return;
     infoEl.textContent='OpenStreetMapから取得中…（取得状況はコース欄に表示）';courseLog.clear();
-    try{const g=await fetchOsmCourses();pushUndo();courseGeo=g;editSel=null;vSel=[];drawCourses();save();markers();info()}catch(e){alert('取得できませんでした：'+(e&&e.message||e));info()}};
+    try{const g=await fetchOsmCourses();pushUndo();courseGeo=g;editSel=null;vSel=[];setMoveMode(false);hideMenu();drawCourses();save();markers();info()}catch(e){alert('取得できませんでした：'+(e&&e.message||e));info()}};
   info();
   return {markers,info};
 })():null;
