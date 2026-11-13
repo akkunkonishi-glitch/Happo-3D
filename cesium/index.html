@@ -350,10 +350,11 @@ const mini=(()=>{
     if(ptrs.size===1){const sx=cur.x-prev.x,sy=cur.y-prev.y,hd=camera.heading,zi=Math.max(5,Math.min(18,Math.floor(zoom))),sc=2**(zoom-zi);
       const dx=-(sx*Math.cos(hd)-sy*Math.sin(hd))/sc,dy=-(sx*Math.sin(hd)+sy*Math.cos(hd))/sc;
       const c=camera.positionCartographic,[wx,wy]=toWorld(Cesium.Math.toDegrees(c.longitude),Cesium.Math.toDegrees(c.latitude),zi);
-      const [lon,lat]=fromWorld(wx+dx,wy+dy,zi),carto=Cesium.Cartographic.fromDegrees(lon,lat),g=globe.getHeight(carto);
-      const ground=g!==undefined?g:lastGround;if(ground==null)return;
-      camera.setView({destination:Cesium.Cartesian3.fromDegrees(lon,lat,ground+followH()),orientation:{heading:camera.heading,pitch:camera.pitch,roll:0}});
-      followActive=followOn.checked;followSuppressed=false;scene.requestRender()}
+      const [lon,lat]=fromWorld(wx+dx,wy+dy,zi);let h=c.height;  // 追従オフ：今の絶対高度のまま水平移動
+      if(followOn.checked){const g=globe.getHeight(Cesium.Cartographic.fromDegrees(lon,lat)),ground=g!==undefined?g:lastGround;  // 追従オン：地表＋設定高さ
+        if(ground!=null){h=ground+followH();followActive=true;followSuppressed=false}}
+      camera.setView({destination:Cesium.Cartesian3.fromDegrees(lon,lat,h),orientation:{heading:camera.heading,pitch:camera.pitch,roll:0}});
+      scene.requestRender()}
     else if(ptrs.size===2){const [a,b]=[...ptrs.values()],d=Math.hypot(a.x-b.x,a.y-b.y);
       if(pinch0){zoom=Math.max(10,Math.min(18.5,zoom+Math.log2(d/pinch0)))}pinch0=d;request()}});
   const up=e=>{ptrs.delete(e.pointerId);pinch0=null};
