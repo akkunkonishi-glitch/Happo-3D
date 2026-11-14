@@ -760,10 +760,12 @@ loadCourses().then(()=>{if(editor){editor.markers();editor.info()}});
 // リフト：aerialway=pylon の支柱があればその位置、無ければ線に沿って一定間隔で支柱を自動生成。支柱の頂点どうしを空中のワイヤーで結ぶ。
 // 建物：height → building:levels×3.5m → どちらも無ければ OBJ3D.defaultLevels 階建てとして押し出す。カメラが近いときだけ表示。
 const OBJ3D={
-  files:{lifts:'data/lifts3d.geojson',buildings:'data/buildings.geojson'},keys:{lifts:'happoLifts3d',buildings:'happoBuildings'},
+  files:{lifts:'data/lifts3d.geojson',buildings:'data/buildings.geojson'},keys:{lifts:'happoLifts3d',buildings:'happoBuildings',liftsEdit:'happoLifts3dEdit'},
   towerHeight:{gondola:14,cable_car:20,chair_lift:10,mixed_lift:10,drag_lift:6,'t-bar':6,'j-bar':6,platter:6,rope_tow:4,default:10},   // 支柱の高さ(m)
   towerSpacing:{gondola:200,cable_car:300,chair_lift:90,mixed_lift:120,drag_lift:70,'t-bar':70,'j-bar':70,platter:70,rope_tow:50,default:100},  // 支柱を自動生成するときの間隔(m)
   stationHeight:6,      // 両端（駅）のワイヤーの高さ(m)
+  stationBox:{size:10,height:6},  // 駅舎データが無いリフトの両端に置く箱（10m角・高さ6m）
+  stationNear:40,       // OSMの駅舎の面がリフトの端からこの距離(m)以内なら、そちらを優先して箱は置かない
   levelHeight:3.5,      // 1階あたりの高さ(m)
   defaultLevels:2,      // height も building:levels も無い建物の階数
   buildingShowAbove:2500, // カメラが地表からこの高さ(m)以内のときだけ建物を表示
@@ -785,14 +787,26 @@ function generateTowers(c,spacing){  // 線に沿って一定間隔で支柱の�
   const n=Math.max(1,Math.ceil(L/spacing)),out=[];
   for(let k=1;k<n;k++){let t=k*L/n,i=0;while(i<seg.length-1&&t>seg[i]){t-=seg[i];i++}const f=seg[i]?t/seg[i]:0;out.push([+(c[i][0]+(c[i+1][0]-c[i][0])*f).toFixed(7),+(c[i][1]+(c[i+1][1]-c[i][1])*f).toFixed(7)])}
   return out}
-function osmToLifts3d(osm){const pylons=new Map(),feats=[];
-  for(const e of osm.elements||[])if(e.type==='node'&&e.tags&&e.tags.aerialway==='pylon')pylons.set(e.id,[+e.lon.toFixed(7),+e.lat.toFixed(7)]);
+function ringCenter(r){let sx=0,sy=0;const k=r.length-1;for(let i=0;i<k;i++){sx+=r[i][0];sy+=r[i][1]}return [sx/k,sy/k]}
+function nearStationArea(q,areas){return areas.some(a=>{const r=a.geometry.coordinates[0];let ins=false;for(let i=0,j=r.length-1;i<r.length;j=i++){const A=r[i],B=r[j];if((A[1]>q[1])!==(B[1]>q[1])&&q[0]<(B[0]-A[0])*(q[1]-A[1])/(B[1]-A[1])+A[0])ins=!ins}
+  return ins||mDist(q,ringCenter(r))<OBJ3D.stationNear})}
+// リフトの両端の駅：①OSMの駅舎の面が近くにある→それを使う（箱は置かない） ②端がOSMの駅の点→その位置に箱 ③どちらも無い→線の端に箱を自動で置く
+function computeStations(c,areas,nodePos){return ['start','end'].map(side=>{const q=side==='start'?c[0]:c[c.length-1];
+  if(nearStationArea(q,areas))return {side,source:'osm-area'};
+  const np=nodePos&&nodePos[side];if(np)return {side,pos:np,source:'osm-node'};
+  return {side,pos:q.slice(),source:'generated'}})}
+function osmToLifts3d(osm){const pylons=new Map(),stNodes=new Map(),feats=[],areas=[];
+  for(const e of osm.elements||[]){if(e.type!=='node'||!e.tags)continue;const q=[+e.lon.toFixed(7),+e.lat.toFixed(7)];if(e.tags.aerialway==='pylon')pylons.set(e.id,q);else if(e.tags.aerialway==='station')stNodes.set(e.id,q)}
+  for(const e of osm.elements||[]){if(e.type!=='way'||!e.geometry||!e.tags||e.tags.aerialway!=='station')continue;  // 駅舎の面
+    const ring=HappoCourses.cleanRing(e.geometry.map(p=>[+p.lon.toFixed(7),+p.lat.toFixed(7)]),false);if(!ring)continue;
+    const t=e.tags,bh=buildingHeight(t);areas.push({type:'Feature',properties:{id:'way/'+e.id,kind:'station',name:t.name||t['name:ja']||'',height:bh.heightSource==='default'?OBJ3D.stationBox.height:bh.height},geometry:{type:'Polygon',coordinates:[ring]}})}
   for(const e of osm.elements||[]){if(e.type!=='way'||!e.geometry||!e.tags||!e.tags.aerialway||OBJ3D.skip3d.includes(e.tags.aerialway))continue;
     const t=e.tags,c=e.geometry.map(p=>[+p.lon.toFixed(7),+p.lat.toFixed(7)]);if(c.length<2)continue;
     let towers=(e.nodes||[]).map(id=>pylons.get(id)).filter(Boolean),src='osm';
     if(!towers.length){towers=generateTowers(c,OBJ3D.towerSpacing[t.aerialway]||OBJ3D.towerSpacing.default);src='generated'}
-    feats.push({type:'Feature',properties:{id:'way/'+e.id,name:t.name||t['name:ja']||'',aerialway:t.aerialway,towers,towerSource:src,towerHeight:OBJ3D.towerHeight[t.aerialway]||OBJ3D.towerHeight.default},geometry:{type:'LineString',coordinates:c}})}
-  return {type:'FeatureCollection',properties:{source:'OpenStreetMap (Overpass API)',license:'ODbL © OpenStreetMap contributors',note:'支柱は aerialway=pylon、無いリフトは一定間隔で自動生成',generated:new Date().toISOString()},features:feats}}
+    const nd=e.nodes||[],nodePos={start:stNodes.get(nd[0]),end:stNodes.get(nd[nd.length-1])};
+    feats.push({type:'Feature',properties:{id:'way/'+e.id,kind:'lift',name:t.name||t['name:ja']||'',aerialway:t.aerialway,towers,towerSource:src,towerHeight:OBJ3D.towerHeight[t.aerialway]||OBJ3D.towerHeight.default,stations:computeStations(c,areas,nodePos)},geometry:{type:'LineString',coordinates:c}})}
+  return {type:'FeatureCollection',properties:{source:'OpenStreetMap (Overpass API)',license:'ODbL © OpenStreetMap contributors',note:'支柱は aerialway=pylon、無いリフトは一定間隔で自動生成。駅舎データが無い端には10m角・高さ6mの箱を自動配置',generated:new Date().toISOString()},features:[...feats,...areas]}}
 function buildingHeight(t){const num=v=>{const x=parseFloat(String(v||'').replace(',','.'));return isFinite(x)&&x>0?x:null};
   const h=num(t.height);if(h)return {height:+h.toFixed(1),heightSource:'height'};
   const lv=num(t['building:levels']);if(lv)return {height:+(lv*OBJ3D.levelHeight).toFixed(1),levels:lv,heightSource:'levels'};
@@ -811,16 +825,29 @@ async function overpassQuery(q,label){
     catch(e){obj3dLog.add('✗ '+label+'：'+host+'：'+whyFailed(e),'ng')}finally{clearTimeout(tm)}}
   throw new Error('すべてのOverpassミラーで取得できませんでした')}
 // --- 描画 ---
-async function drawLifts(){liftsSrc.entities.removeAll();if(!lifts3dGeo)return;let nT=0;
-  for(const f of lifts3dGeo.features){const p=f.properties,c=f.geometry.coordinates;if(!c||c.length<2)continue;
-    const th=p.towerHeight||OBJ3D.towerHeight[p.aerialway]||OBJ3D.towerHeight.default,towers=p.towers||[];
-    const pts=[{q:c[0],h:OBJ3D.stationHeight},...towers.map(q=>({q,h:th})),{q:c[c.length-1],h:OBJ3D.stationHeight}];
-    const g=await Promise.all(pts.map(o=>sampleGround(o.q[0],o.q[1])));
-    liftsSrc.entities.suspendEvents();
-    towers.forEach((q,i)=>{const base=g[i+1];nT++;  // 支柱：地表から高さthの柱
-      liftsSrc.entities.add({position:Cesium.Cartesian3.fromDegrees(q[0],q[1],base+th/2),cylinder:{length:th+1,topRadius:0.35,bottomRadius:0.6,material:Cesium.Color.fromCssColorString('#5f6368'),distanceDisplayCondition:new Cesium.DistanceDisplayCondition(0,8000)}})});
-    liftsSrc.entities.add({polyline:{positions:Cesium.Cartesian3.fromDegreesArrayHeights(pts.flatMap((o,i)=>[o.q[0],o.q[1],g[i]+o.h])),width:2,arcType:Cesium.ArcType.NONE,material:Cesium.Color.fromCssColorString('#1e1e1e').withAlpha(0.9)}});  // ワイヤー
-    liftsSrc.entities.resumeEvents()}
+const liftEnts=new Map(),isLiftF=f=>f.geometry&&f.geometry.type==='LineString',isStationF=f=>f.properties&&f.properties.kind==='station'&&f.geometry.type==='Polygon';
+const ST_MAT=Cesium.Color.fromCssColorString('#e9e6dc'),ST_OUT=Cesium.Color.fromCssColorString('#7a7a7a');
+async function drawLift(f){for(const e of liftEnts.get(f)||[])liftsSrc.entities.remove(e);const out=[],add=o=>{out.push(liftsSrc.entities.add(o))};
+  const p=f.properties,c=f.geometry.coordinates;if(!c||c.length<2){liftEnts.set(f,out);return 0}
+  if(!p.stations)p.stations=computeStations(c,lifts3dGeo.features.filter(isStationF));  // 古いデータには駅の情報が無いので補う
+  const th=p.towerHeight||OBJ3D.towerHeight[p.aerialway]||OBJ3D.towerHeight.default,towers=p.towers||[];
+  const st=side=>p.stations.find(x=>x.side===side)||{},sS=st('start'),sE=st('end');
+  const ends=[sS.pos||c[0],sE.pos||c[c.length-1]];
+  const pts=[{q:ends[0],h:OBJ3D.stationHeight},...towers.map(q=>({q,h:th})),{q:ends[1],h:OBJ3D.stationHeight}];
+  const g=await Promise.all(pts.map(o=>sampleGround(o.q[0],o.q[1])));
+  towers.forEach((q,i)=>add({position:Cesium.Cartesian3.fromDegrees(q[0],q[1],g[i+1]+th/2),cylinder:{length:th+1,topRadius:0.35,bottomRadius:0.6,material:Cesium.Color.fromCssColorString('#5f6368'),distanceDisplayCondition:new Cesium.DistanceDisplayCondition(0,8000)}}));  // 支柱
+  add({polyline:{positions:Cesium.Cartesian3.fromDegreesArrayHeights(pts.flatMap((o,i)=>[o.q[0],o.q[1],g[i]+o.h])),width:2,arcType:Cesium.ArcType.NONE,material:Cesium.Color.fromCssColorString('#1e1e1e').withAlpha(0.9)}});  // ワイヤー（駅舎の位置から張る）
+  [[sS,0,c[0],c[1]],[sE,pts.length-1,c[c.length-2],c[c.length-1]]].forEach(([s_,i,a,b])=>{if(!s_.pos)return;  // 駅舎データが無い端の箱（リフトの向きに合わせる）
+    const pos=Cesium.Cartesian3.fromDegrees(s_.pos[0],s_.pos[1],g[i]+OBJ3D.stationBox.height/2-0.5),hd=Math.atan2((b[0]-a[0])*Math.cos(a[1]*Math.PI/180),b[1]-a[1]);
+    const e=liftsSrc.entities.add({position:pos,orientation:Cesium.Transforms.headingPitchRollQuaternion(pos,new Cesium.HeadingPitchRoll(hd,0,0)),
+      box:{dimensions:new Cesium.Cartesian3(OBJ3D.stationBox.size,OBJ3D.stationBox.size,OBJ3D.stationBox.height+1),material:ST_MAT,outline:true,outlineColor:ST_OUT,distanceDisplayCondition:new Cesium.DistanceDisplayCondition(0,8000)}});
+    e.__st={f,station:s_};out.push(e)});
+  liftEnts.set(f,out);scene.requestRender();return towers.length}
+async function drawLifts(){liftsSrc.entities.removeAll();liftEnts.clear();if(!lifts3dGeo)return 0;let nT=0;
+  for(const f of lifts3dGeo.features.filter(isStationF)){const r=f.geometry.coordinates[0];  // OSMの駅舎の面
+    const gs=await Promise.all(r.slice(0,-1).map(q=>sampleGround(q[0],q[1]))),base=Math.min(...gs)-1,top=Math.max(...gs)+(f.properties.height||OBJ3D.stationBox.height);
+    liftsSrc.entities.add({polygon:{hierarchy:new Cesium.PolygonHierarchy(Cesium.Cartesian3.fromDegreesArray(r.flat())),height:base,extrudedHeight:top,material:ST_MAT,outline:true,outlineColor:ST_OUT,distanceDisplayCondition:new Cesium.DistanceDisplayCondition(0,8000)}})}
+  liftsSrc.entities.suspendEvents();for(const f of lifts3dGeo.features.filter(isLiftF))nT+=await drawLift(f);liftsSrc.entities.resumeEvents();
   scene.requestRender();return nT}
 async function drawBuildings(){bldSrc.entities.removeAll();if(!buildingsGeo)return;const ddc=new Cesium.DistanceDisplayCondition(0,OBJ3D.buildingShowAbove+500);
   const mat=Cesium.Color.fromCssColorString('#f3f1ea').withAlpha(0.95),outline=Cesium.Color.fromCssColorString('#8a8a8a');let n=0;
@@ -836,26 +863,45 @@ function updateBuildingVisibility(){const c=camera.positionCartographic,above=la
 camera.changed.addEventListener(updateBuildingVisibility);camera.moveEnd.addEventListener(updateBuildingVisibility);
 // --- 読み込み ---
 const BB=()=>{const [s_,w_,n_,e_]=COURSE.bbox;return s_+','+w_+','+n_+','+e_};
+// 管理区域KMLの範囲：建物はこの多角形の内側だけ取得・表示する
+const KML_POLY=()=>boundary.map(q=>q[1]+' '+q[0]).join(' ');
+function inKml(q){let ins=false;for(let i=0,j=boundary.length-1;i<boundary.length;j=i++){const a=boundary[i],b=boundary[j];if((a[1]>q[1])!==(b[1]>q[1])&&q[0]<(b[0]-a[0])*(q[1]-a[1])/(b[1]-a[1])+a[0])ins=!ins}return ins}
+const buildingInKml=f=>{const r=f.geometry&&f.geometry.coordinates&&f.geometry.coordinates[0];return !!r&&r.length>=4&&inKml(ringCenter(r))};
 const OBJ3D_SRC={
-  lifts:{label:'リフト',query:()=>'[out:json][timeout:60];way["aerialway"]('+BB()+')->.l;.l out geom;node(w.l)["aerialway"="pylon"];out;',convert:osmToLifts3d,set:g=>{lifts3dGeo=g},draw:drawLifts},
-  buildings:{label:'建物',query:()=>'[out:json][timeout:90];(way["building"]('+BB()+');relation["building"]["type"="multipolygon"]('+BB()+'););out geom;',convert:osmToBuildings,set:g=>{buildingsGeo=g},draw:drawBuildings}};
+  lifts:{label:'リフト',query:()=>'[out:json][timeout:60];way["aerialway"]('+BB()+')->.l;.l out geom;node(w.l)["aerialway"~"^(pylon|station)$"];out;',convert:osmToLifts3d,set:g=>{lifts3dGeo=g},draw:drawLifts},
+  buildings:{label:'建物',query:()=>'[out:json][timeout:90];(way["building"](poly:"'+KML_POLY()+'");relation["building"]["type"="multipolygon"](poly:"'+KML_POLY()+'"););out geom;',convert:osmToBuildings,set:g=>{buildingsGeo=g},draw:drawBuildings}};
 const obj3dCount={};
 function showObj3dInfo(){document.getElementById('obj3dInfo').textContent=['lifts','buildings'].map(k=>OBJ3D_SRC[k].label+(obj3dCount[k]||'未読み込み')).join('／')}
 async function loadObj3d(kind,forceOsm){const S=OBJ3D_SRC[kind];let geo=null,src='';
-  if(!forceOsm){try{const r=await fetch(OBJ3D.files[kind],{cache:'no-cache'});if(r.ok){geo=await r.json();src=OBJ3D.files[kind].split('/').pop()}else obj3dLog.add('・'+S.label+'：'+OBJ3D.files[kind].split('/').pop()+' はまだ無い')}catch(e){}
+  if(!forceOsm&&EDIT&&kind==='lifts'){const v=lsGet(OBJ3D.keys.liftsEdit);if(v&&v.features&&v.features.length){geo=v;src='端末で編集中のデータ'}}
+  if(!forceOsm&&!geo){try{const r=await fetch(OBJ3D.files[kind],{cache:'no-cache'});if(r.ok){geo=await r.json();src=OBJ3D.files[kind].split('/').pop()}else obj3dLog.add('・'+S.label+'：'+OBJ3D.files[kind].split('/').pop()+' はまだ無い')}catch(e){}
     if(!geo){const v=lsGet(OBJ3D.keys[kind]);if(v&&v.features&&v.features.length){geo=v;src='端末に保存した取得結果'}}}
   if(!geo){obj3dLog.add('… '+S.label+'をOpenStreetMapから取得中');try{geo=S.convert(await overpassQuery(S.query(),S.label));src='OSMから取得';if(!lsSet(OBJ3D.keys[kind],geo))obj3dLog.add('・'+S.label+'：端末に保存できませんでした（容量不足）。書き出しボタンで保存してください')}
     catch(e){obj3dLog.add('✗ '+S.label+'を取得できませんでした','ng');obj3dCount[kind]='：取得失敗';showObj3dInfo();return}}
+  if(kind==='buildings'){const before=geo.features.length;geo={...geo,features:geo.features.filter(buildingInKml)};if(before!==geo.features.length)obj3dLog.add('・建物：管理区域KMLの範囲外の'+(before-geo.features.length)+'件を除外')}  // ファイル・端末の保存から読んだ場合も範囲外は表示しない
   S.set(geo);const n=geo.features.length;obj3dCount[kind]=n+'件（'+src+'）';showObj3dInfo();
-  const m=await S.draw();if(kind==='lifts')obj3dCount[kind]=n+'本・支柱'+m+'本（'+src+'）';showObj3dInfo();obj3dLog.add('✓ '+S.label+'：'+n+'件を表示','ok')}
+  const m=await S.draw();if(kind==='lifts'){const L=geo.features.filter(isLiftF),boxes=L.reduce((k,f)=>k+(f.properties.stations||[]).filter(x=>x.pos).length,0);obj3dCount[kind]=L.length+'本・支柱'+m+'本・駅舎の箱'+boxes+'（'+src+'）'}showObj3dInfo();obj3dLog.add('✓ '+S.label+'：'+n+'件を表示','ok')}
 function downloadGeo(geo,name){if(!geo){alert('まだデータがありません');return}const a=document.createElement('a');a.href=URL.createObjectURL(new Blob([JSON.stringify(geo)],{type:'application/geo+json'}));a.download=name;document.body.appendChild(a);a.click();setTimeout(()=>{URL.revokeObjectURL(a.href);a.remove()},1000)}
 document.getElementById('liftsOn').onchange=e=>{liftsSrc.show=e.target.checked;scene.requestRender()};
 document.getElementById('bldOn').onchange=()=>updateBuildingVisibility();
 document.getElementById('liftsExport').onclick=()=>downloadGeo(lifts3dGeo,'lifts3d.geojson');
 document.getElementById('bldExport').onclick=()=>downloadGeo(buildingsGeo,'buildings.geojson');
-document.getElementById('obj3dRefetch').onclick=async()=>{if(!confirm('リフトと建物を OpenStreetMap から取り直しますか？'))return;try{localStorage.removeItem(OBJ3D.keys.lifts);localStorage.removeItem(OBJ3D.keys.buildings)}catch(e){}
+document.getElementById('obj3dRefetch').onclick=async()=>{if(!confirm('リフトと建物を OpenStreetMap から取り直しますか？'+(EDIT?'（駅舎の位置の編集は破棄されます）':'')))return;try{localStorage.removeItem(OBJ3D.keys.liftsEdit);localStorage.removeItem(OBJ3D.keys.lifts);localStorage.removeItem(OBJ3D.keys.buildings)}catch(e){}
   await loadObj3d('lifts',true);await loadObj3d('buildings',true)};
 showObj3dInfo();
+// 編集モード：駅舎の箱をドラッグすると地表に沿って動く（ワイヤーも追従）。位置は端末に保存し、lifts3d書き出しに含まれる
+if(EDIT){let sd=null,raf=0;const cv=scene.canvas,loc=e=>{const r=cv.getBoundingClientRect();return [e.clientX-r.left,e.clientY-r.top]};
+  const ground=(x,y)=>{const ray=camera.getPickRay(new Cesium.Cartesian2(x,y)),p=ray&&globe.pick(ray,scene);if(!p)return null;const c=Cesium.Cartographic.fromCartesian(p);return [+Cesium.Math.toDegrees(c.longitude).toFixed(7),+Cesium.Math.toDegrees(c.latitude).toFixed(7)]};
+  // 地図の操作やコース編集より先に判定するため、documentの捕捉段階で受ける
+  document.addEventListener('pointerdown',e=>{if(e.target!==cv||sd||drawing)return;const [x,y]=loc(e),hit=scene.pick(new Cesium.Cartesian2(x,y)),ent=hit&&hit.id;
+    if(ent&&ent.__st&&document.getElementById('liftsOn').checked){sd={id:e.pointerId,st:ent.__st,moved:false};e.stopPropagation()}},true);
+  document.addEventListener('pointermove',e=>{if(!sd||e.pointerId!==sd.id)return;e.stopPropagation();const ll=ground(...loc(e));if(!ll)return;
+    sd.st.station.pos=ll;sd.st.station.source='edited';sd.moved=true;if(!raf)raf=requestAnimationFrame(()=>{raf=0;if(sd)drawLift(sd.st.f)})},true);
+  const up=e=>{if(!sd||e.pointerId!==sd.id)return;e.stopPropagation();const s_=sd;sd=null;
+    if(s_.moved){drawLift(s_.st.f);lifts3dGeo.properties=lifts3dGeo.properties||{};lifts3dGeo.properties.edited=new Date().toISOString();
+      const ok=lsSet(OBJ3D.keys.liftsEdit,lifts3dGeo);obj3dLog.add(ok?'✓ 駅舎の位置を保存しました（'+(s_.st.f.properties.name||'リフト')+'）':'✗ 駅舎の位置を端末に保存できませんでした',ok?'ok':'ng')}};
+  document.addEventListener('pointerup',up,true);document.addEventListener('pointercancel',up,true);
+  obj3dLog.add('編集モード：リフト両端の駅舎の箱はドラッグで位置を直せます')}
 (async()=>{await loadObj3d('lifts');await loadObj3d('buildings')})();
 // ===== 視点スティック（左下）=====
 // FPSの右スティックと同じ：左右に倒すとその場で左右に回り、上下に倒すと見上げ・見下ろし。カメラの位置は変えない。

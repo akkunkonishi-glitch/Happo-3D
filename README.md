@@ -51,5 +51,6 @@ node tools/make-courses.js overpass.json
 - リフト：`cesium/data/lifts3d.geojson`、建物：`cesium/data/buildings.geojson` を読みます（© OpenStreetMap contributors）。
   ファイルが無い間は、端末に保存した前回の取得結果、それも無ければブラウザから Overpass API で取得します。
 - リフトは aerialway=pylon の支柱位置に柱（チェア10m・ゴンドラ14m・Tバー等6m）を立て、頂点どうしをワイヤーで結びます。支柱データが無いリフトは一定間隔（チェア約90m・ゴンドラ約200m）で支柱を自動生成します。
-- 建物は height → building:levels×3.5m → どちらも無ければ2階建て（7m）で押し出し、名前があればラベルを出します。カメラが地表から2.5km以内のときだけ表示します。
+- リフトの駅舎：OSMの駅舎の面（aerialway=station）があればそれを優先、駅の点だけならその位置に、どちらも無ければ線の始点・終点に10m角・高さ6mの箱を自動で置きます。編集モード（?edit=1）では箱をドラッグして位置を直せます（端末に保存、lifts3d書き出しに含まれます）。
+- 建物は管理区域KMLの範囲内だけを取得・表示します。height → building:levels×3.5m → どちらも無ければ2階建て（7m）で押し出し、名前があればラベルを出します。カメラが地表から2.5km以内のときだけ表示します。
 - パネルの「lifts3d書き出し」「buildings書き出し」でファイルを保存し、`cesium/data/` に置くと全員に反映されます。
