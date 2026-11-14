@@ -203,7 +203,8 @@ const viewer=new Cesium.Viewer('cesium',{
   baseLayer:new Cesium.ImageryLayer(imagery),terrainProvider,
   baseLayerPicker:false,geocoder:false,homeButton:false,sceneModePicker:false,navigationHelpButton:false,
   animation:false,timeline:false,fullscreenButton:false,infoBox:false,selectionIndicator:false,
-  requestRenderMode:true,maximumRenderTimeChange:Infinity,msaaSamples:1});
+  requestRenderMode:true,maximumRenderTimeChange:Infinity,msaaSamples:1,
+  showRenderLoopErrors:false});  // 描画エラーで画面を止める表示は出さず、下のrenderErrorで立て直す
 const scene=viewer.scene,globe=scene.globe,camera=viewer.camera,ssc=scene.screenSpaceCameraController;
 // 航空写真を優先して読む：写真の同時接続数を増やし、標高タイルは低い優先度で取得する（地形の細かさは変えない）
 Cesium.RequestScheduler.requestsByServer['cyberjapandata.gsi.go.jp:443']=24;
@@ -546,6 +547,18 @@ function drawCourses(){
 const courseCounts=()=>{const f=courseGeo.features;return 'コース'+f.filter(isCourse).length+'・リフト'+f.filter(x=>x.properties.kind==='lift').length};
 const lsGet=k=>{try{const v=localStorage.getItem(k);return v?JSON.parse(v):null}catch(e){return null}};
 const lsSet=(k,v)=>{try{localStorage.setItem(k,JSON.stringify(v));return true}catch(e){return false}};
+// コースの編集データは、形の正しいものだけを書き、前回分を .bak に残してから上書きし、書けたか読み戻して確かめる（失敗したら前回分に戻す）
+function cleanCourseGeo(geo){const ok=q=>Array.isArray(q)&&isFinite(q[0])&&isFinite(q[1]);
+  const feats=((geo&&geo.features)||[]).filter(f=>f&&f.properties&&f.properties.id!=null&&f.geometry&&Array.isArray(f.geometry.coordinates)&&(
+    f.geometry.type==='Polygon'?f.geometry.coordinates.length&&f.geometry.coordinates.every(r=>Array.isArray(r)&&r.length>=4&&r.every(ok)):
+    f.geometry.type==='LineString'?f.geometry.coordinates.length>=2&&f.geometry.coordinates.every(ok):false));
+  return JSON.parse(JSON.stringify({type:'FeatureCollection',properties:(geo&&geo.properties)||{},features:feats},(k,v)=>k.startsWith('__')?undefined:v))}
+function saveCoursesSafe(key,geo){let g;try{g=cleanCourseGeo(geo)}catch(e){return false}
+  const n=g.features.filter(f=>f.properties.kind==='course').length;if(!n)return false;  // コース0件では上書きしない（前の保存を守る）
+  let prev=null;try{prev=localStorage.getItem(key)}catch(e){}
+  try{if(prev)localStorage.setItem(key+'.bak',prev)}catch(e){}
+  try{const txt=JSON.stringify(g);localStorage.setItem(key,txt);if(localStorage.getItem(key)!==txt)throw new Error('verify');JSON.parse(localStorage.getItem(key));return true}
+  catch(e){try{if(prev)localStorage.setItem(key,prev)}catch(_){}return false}}
 // 取得状況を画面に1行ずつ表示（成功=緑、失敗=赤）
 const courseLog={lines:[],add(text,cls){this.lines.push({text,cls});this.render()},clear(){this.lines=[];this.render()},
   render(){const el=document.getElementById('courseStatus');el.textContent='';for(const l of this.lines){const d=document.createElement('div');d.textContent=l.text;if(l.cls)d.className=l.cls;el.appendChild(d)}el.scrollTop=el.scrollHeight}};
@@ -577,6 +590,7 @@ async function loadCourses(){
     if(!n){courseLog.add('・'+label+'：コース0件のため使わない');return false}
     courseGeo=g;drawCourses();info.textContent=courseCounts()+'（'+src+'）';courseLog.add('✓ '+label+'：コース'+n+'件を表示','ok');return true};
   if(EDIT){if(tryUse(lsGet(COURSE.keys.edit),'端末の編集中データ','端末で編集中のデータ'))return;
+    if(tryUse(lsGet(COURSE.keys.edit+'.bak'),'端末の編集中データ（ひとつ前の保存）','端末で編集中のデータ・ひとつ前の保存から復元'))return;
     if(tryUse(lsGet(COURSE.keys.oldEdit),'旧バージョンの編集データ','旧バージョンの編集を引き継ぎ'))return}
   try{const r=await fetch(COURSE.file,{cache:'no-cache'});
     if(r.ok){let g=null;try{g=await r.json()}catch(e){courseLog.add('✗ courses.geojson：JSONとして読めない','ng')}if(g&&tryUse(g,'courses.geojson','courses.geojson'))return}
@@ -621,9 +635,18 @@ const editor=EDIT?(function(){
   const ORANGE=Cesium.Color.fromCssColorString('#ff6d00'),BLUE=Cesium.Color.fromCssColorString('#2979ff');
   // --- 保存・取り消し ---
   function save(){clearTimeout(saveT);saveT=setTimeout(()=>{courseGeo.properties=courseGeo.properties||{};courseGeo.properties.edited=new Date().toISOString();
-    if(lsSet(COURSE.keys.edit,courseGeo))document.getElementById('courseInfo').textContent=courseCounts()+'（端末で編集中のデータ・自動保存済み）'},300)}
+    if(renderTrouble){save();return}  // 描画エラーから立ち直るまでは保存を待つ
+    document.getElementById('courseInfo').textContent=courseCounts()+(saveCoursesSafe(COURSE.keys.edit,courseGeo)?'（端末で編集中のデータ・自動保存済み）':'（⚠ 端末に保存できませんでした。前回の保存はそのまま残っています）')},300)}
   function pushUndo(){undoStack.push({geo:JSON.stringify(courseGeo),sel:editSel&&editSel.properties.id});if(undoStack.length>40)undoStack.shift()}
   function changed(...fts){for(const f of fts)redrawFeature(f);save();markers();info()}
+  // ドラッグ中のプレビュー・指の状態・長押しタイマー・頂点マーカーをすべて片付ける（削除・結合・分割・元に戻す・描画エラーのとき）
+  function cancelInteraction(){clearTimeout(lp);lp=null;if(raf){cancelAnimationFrame(raf);raf=0}
+    if(pv){if(pv.raf)cancelAnimationFrame(pv.raf);for(const e of pv.ents)mk.entities.remove(e);pv=null}
+    drag=null;moveDrag=null;down=null;ptrs.clear();mk.entities.removeAll()}
+  function disposeFeature(ft){if(!ft)return;if(pv&&pv.ft===ft||editSel===ft)cancelInteraction();vHeights.delete(ft);removeCourseFeature(ft);
+    if(editSel===ft){editSel=null;vSel=[];merging=false;hideMenu()}}
+  // 選択中のコースがデータから消えていたら選択を外す（古い参照を描かない）
+  const selAlive=()=>{if(editSel&&(!courseGeo.features.includes(editSel)||!editSel.geometry||!editSel.properties)){editSel=null;vSel=[];merging=false;hideMenu()}return !!editSel};
   // --- 位置の取得・当たり判定（指の下の地面からの距離で判定。地形の標高取得に頼らない）---
   function pickAt(x,y){const ray=camera.getPickRay(new Cesium.Cartesian2(x,y)),p=ray&&globe.pick(ray,scene);if(!p)return null;const c=Cesium.Cartographic.fromCartesian(p);
     return {ll:[+Cesium.Math.toDegrees(c.longitude).toFixed(7),+Cesium.Math.toDegrees(c.latitude).toFixed(7)],mpp:Cesium.Cartesian3.distance(camera.position,p)*2*Math.tan(camera.frustum.fovy/2)/scene.canvas.clientHeight}}
@@ -640,7 +663,7 @@ const editor=EDIT?(function(){
   window.__editHit=(x,y)=>!creating&&!merging&&!!editSel&&(nearestVertex(x,y,24)>=0||insideSel(x,y));  // 頂点・選択中コースの内側をつかんだときは地図を動かさない
   // --- 表示 ---
   const pt=(q,size,color,outline)=>({position:Cesium.Cartesian3.fromDegrees(q[0],q[1]),point:{pixelSize:size,color,outlineColor:outline||Cesium.Color.WHITE,outlineWidth:2,heightReference:Cesium.HeightReference.CLAMP_TO_GROUND,disableDepthTestDistance:Number.POSITIVE_INFINITY}});
-  function markers(){mk.entities.suspendEvents();mk.entities.removeAll();
+  function markers(){selAlive();mk.entities.suspendEvents();mk.entities.removeAll();
     if(editSel){const r=courseRing(editSel);
       r.slice(0,-1).forEach((q,i)=>mk.entities.add(pt([(q[0]+r[i+1][0])/2,(q[1]+r[i+1][1])/2],8,ORANGE.withAlpha(0.7))));  // 辺の目印
       verts().forEach((q,i)=>{const on=drag&&drag.i===i,s=vSel.includes(i);mk.entities.add(pt(q,on||s?20:16,on&&drag.armed?Cesium.Color.fromCssColorString('#ff1744'):(s?BLUE:Cesium.Color.WHITE),ORANGE))})}
@@ -669,7 +692,7 @@ const editor=EDIT?(function(){
   function startPreview(){const ft=editSel,r=courseRing(ft);let hs=vHeights.get(ft);
     if(!hs||hs.length!==r.length){hs=r.map(q=>globe.getHeight(Cesium.Cartographic.fromDegrees(q[0],q[1])));const known=hs.filter(h=>h!==undefined),avg=known.length?known.reduce((a,b)=>a+b,0)/known.length:(lastGround||0);hs=hs.map(h=>h===undefined?avg:h)}
     hs=hs.slice();const pos=r.map((q,k)=>Cesium.Cartesian3.fromDegrees(q[0],q[1],hs[k]+1.5));
-    for(const e of featEnts.get(ft)||[])e.show=false;for(const e of mk.entities.values)e.show=false;  // 地形に貼ったものは一時的に隠す
+    removeCourseFeature(ft);mk.entities.removeAll();  // 地形に貼ったものは一時的に外す（showの切替は作成途中の形と重なるとCesiumが描画エラーになるため使わない）。離したときに作り直す
     const ents=[mk.entities.add({polyline:{positions:new Cesium.CallbackProperty(()=>pv?pv.pos:pos,false),width:3,material:ORANGE,depthFailMaterial:new Cesium.ColorMaterialProperty(ORANGE.withAlpha(0.5)),arcType:Cesium.ArcType.NONE}})];
     if(drag)ents.push(mk.entities.add({position:new Cesium.CallbackProperty(()=>pv?pv.pos[drag?drag.i:0]:pos[0],false),point:{pixelSize:20,color:Cesium.Color.WHITE,outlineColor:ORANGE,outlineWidth:2,disableDepthTestDistance:Number.POSITIVE_INFINITY}}));
     pv={ft,hs,pos,ents,orig:moveDrag?moveDrag.orig[0]:null,xy:null,raf:0};scene.requestRender()}
@@ -704,7 +727,7 @@ const editor=EDIT?(function(){
     if(b===undefined||Math.min((b-a+n)%n,(a-b+n)%n)<2){alert('この位置では分割できません（隣り合わない2つの頂点が必要です）');return}
     const path=(s,e)=>{const o=[];for(let i=s;;i=(i+1)%n){o.push(v[i]);if(i===e)break}return o};
     const p1=path(a,b),p2=path(b,a);if(p1.length<3||p2.length<3){alert('分割すると点が足りなくなります');return}
-    pushUndo();const f1=editSel,f2=JSON.parse(JSON.stringify(f1));
+    pushUndo();cancelInteraction();const f1=editSel,f2=JSON.parse(JSON.stringify(f1,(k,v)=>k.startsWith('__')?undefined:v));
     f1.geometry.coordinates=[HappoCourses.cleanRing(p1,false)];f2.geometry.coordinates=[HappoCourses.cleanRing(p2,false)];
     f2.properties.id=(f1.properties.id||'c')+'-split-'+Date.now().toString(36);f2.properties.name=(f1.properties.name||'コース')+'（分割）';
     if(!f1.geometry.coordinates[0]||!f2.geometry.coordinates[0]){courseGeo=JSON.parse(undoStack.pop().geo);drawCourses();editSel=null;alert('分割できませんでした');markers();info();return}
@@ -714,7 +737,7 @@ const editor=EDIT?(function(){
   function doMerge(b){let u;try{u=polygonClipping.union(editSel.geometry.coordinates,b.geometry.coordinates)}catch(e){alert('結合できませんでした');merging=false;info();return}
     if(!u||u.length!==1){alert('離れているため結合できません（重なるか接しているコースを選んでください）');merging=false;info();return}
     const rings=[HappoCourses.cleanRing(u[0][0],false),...u[0].slice(1).map(h=>HappoCourses.cleanRing(h,true))].filter(Boolean);if(!rings[0]){alert('結合できませんでした');merging=false;info();return}
-    pushUndo();editSel.geometry.coordinates=rings;removeCourseFeature(b);courseGeo.features=courseGeo.features.filter(f=>f!==b);merging=false;vSel=[];changed(editSel);msg='「'+(b.properties.name||'名前なし')+'」を結合しました';info()}
+    pushUndo();cancelInteraction();editSel.geometry.coordinates=rings;courseGeo.features=courseGeo.features.filter(f=>f!==b);disposeFeature(b);merging=false;vSel=[];changed(editSel);msg='「'+(b.properties.name||'名前なし')+'」を結合しました';info()}
   // --- 1本指：頂点をつかんだときだけ頂点操作。それ以外のドラッグは地図の移動（grabDragが担当）---
   const el=scene.canvas,loc=e=>{const r=el.getBoundingClientRect();return [e.clientX-r.left,e.clientY-r.top]};
   el.addEventListener('pointerdown',e=>{ptrs.add(e.pointerId);
@@ -744,7 +767,7 @@ const editor=EDIT?(function(){
   function hideMenu(){menu.style.display='none'}
   function renameSel(){if(!editSel)return;const v=prompt('コース名',editSel.properties.name||'');if(v!=null){pushUndo();editSel.properties.name=v.trim().slice(0,60);save();info()}}
   function deleteSel(){if(!editSel||!confirm('「'+(editSel.properties.name||'名前なし')+'」を削除しますか？\nこの操作は「元に戻す」で取り消せます'))return;
-    pushUndo();hideMenu();removeCourseFeature(editSel);courseGeo.features=courseGeo.features.filter(f=>f!==editSel);editSel=null;vSel=[];save();markers();info();scene.requestRender();mini.request()}
+    pushUndo();hideMenu();const gone=editSel;courseGeo.features=courseGeo.features.filter(f=>f!==gone);disposeFeature(gone);save();markers();info();scene.requestRender();mini.request()}
   function duplicateSel(){if(!editSel)return;pushUndo();const c=JSON.parse(JSON.stringify(editSel,(k,v)=>k.startsWith('__')?undefined:v));
     c.properties.id='copy/'+Date.now().toString(36);c.properties.name=(editSel.properties.name||'コース')+'（コピー）';c.properties.source='manual';
     c.geometry.coordinates=c.geometry.coordinates.map(r=>r.map(q=>[+(q[0]+0.0003).toFixed(7),+(q[1]-0.0002).toFixed(7)]));  // 元と重ならないよう南東へ約30mずらす
@@ -766,18 +789,37 @@ const editor=EDIT?(function(){
   $('eColorReset').onclick=()=>{if(!editSel||!editSel.properties.color)return;pushUndo();delete editSel.properties.color;changed(editSel)};
   $('eDelete').onclick=()=>deleteSel();
   $('eDup').onclick=()=>duplicateSel();
-  $('eUndo').onclick=()=>{const u=undoStack.pop();if(!u)return;courseGeo=JSON.parse(u.geo);editSel=courseGeo.features.find(f=>f.properties.id===u.sel)||null;vSel=[];creating=null;merging=false;hideMenu();drawCourses();save();markers();info()};
+  $('eUndo').onclick=()=>{const u=undoStack.pop();if(!u)return;cancelInteraction();courseGeo=JSON.parse(u.geo);editSel=courseGeo.features.find(f=>f.properties.id===u.sel)||null;vSel=[];creating=null;merging=false;hideMenu();drawCourses();save();markers();info()};
   $('eExport').onclick=async()=>{const g=JSON.parse(JSON.stringify(courseGeo,(k,v)=>k.startsWith('__')?undefined:v)),txt=JSON.stringify(g);
     alert(await copyText(txt)?'GeoJSONをクリップボードにコピーしました（'+Math.round(txt.length/1024)+'KB）':'コピーできませんでした')};
-  $('eDiscard').onclick=()=>{if(!confirm('端末に保存した編集内容を破棄して元のデータに戻しますか？'))return;try{localStorage.removeItem(COURSE.keys.edit);localStorage.removeItem(COURSE.keys.oldEdit)}catch(e){}
-    editSel=null;creating=null;vSel=[];undoStack.length=0;hideMenu();loadCourses().then(()=>{markers();info()})};
+  $('eDiscard').onclick=()=>{if(!confirm('端末に保存した編集内容を破棄して元のデータに戻しますか？'))return;try{localStorage.removeItem(COURSE.keys.edit);localStorage.removeItem(COURSE.keys.edit+'.bak');localStorage.removeItem(COURSE.keys.oldEdit)}catch(e){}
+    cancelInteraction();editSel=null;creating=null;vSel=[];undoStack.length=0;hideMenu();loadCourses().then(()=>{markers();info()})};
   $('eOsm').onclick=async()=>{if(courseGeo.features.length&&!confirm('今のコースデータを OpenStreetMap から作り直します（中心線は幅'+COURSE.width+'mのポリゴンに変換）。よろしいですか？'))return;
     infoEl.textContent='OpenStreetMapから取得中…（取得状況はコース欄に表示）';courseLog.clear();
-    try{const g=await fetchOsmCourses();pushUndo();courseGeo=g;editSel=null;vSel=[];hideMenu();drawCourses();save();markers();info()}catch(e){alert('取得できませんでした：'+(e&&e.message||e));info()}};
+    try{const g=await fetchOsmCourses();pushUndo();cancelInteraction();courseGeo=g;editSel=null;vSel=[];hideMenu();drawCourses();save();markers();info()}catch(e){alert('取得できませんでした：'+(e&&e.message||e));info()}};
   info();
-  return {markers,info};
+  return {markers,info,cancelInteraction,save};
 })():null;
 loadCourses().then(()=>{if(editor){editor.markers();editor.info()}});
+// Cesiumの地物まとめ描き(Batch)は、表示切替の予約に「もう無い地物」が残ると 's.id' のエラーで描画が止まる。
+// まとめ描きの表示更新の前に、idが無いもの・形がもう無いものを予約から取り除く。
+function guardBatchProto(proto){if(!proto||proto.__happoGuard||typeof proto.updateShows!=='function')return;const orig=proto.updateShows;
+  proto.updateShows=function(primitive){const su=this.showsUpdated,geo=this.geometry;
+    if(su&&su.values&&geo&&geo.get){for(const u of su.values.slice()){const g=u&&u.id!=null?geo.get(u.id):undefined;if(!g||!g.id||g.id.id==null){if(u&&u.id!=null)su.remove(u.id);else su.values.splice(su.values.indexOf(u),1)}}}
+    return orig.call(this,primitive)};proto.__happoGuard=true}
+function guardBatches(){for(let i=0;i<viewer.dataSources.length;i++){const vs=viewer.dataSources.get(i)._visualizers||[];
+  for(const v of vs)for(const k of Object.keys(v)){const arr=v[k];if(!Array.isArray(arr))continue;for(const b of arr){const bs=b&&b._batches;if(bs&&bs.values)for(const x of bs.values)guardBatchProto(Object.getPrototypeOf(x))}}}}
+scene.postRender.addEventListener(()=>{try{guardBatches()}catch(e){}});
+// 描画エラーが出てもページを止めない：エラー表示を出さず、コースと編集マーカーの表示を作り直して描画を再開する（データと保存はそのまま）
+let renderTrouble=false;const renderErrs=[];
+scene.renderError.addEventListener((sc,err)=>{console.error('render error',err);renderTrouble=true;const now=Date.now();renderErrs.push(now);while(renderErrs.length&&now-renderErrs[0]>20000)renderErrs.shift();
+  courseLog.add('⚠ 描画エラーを検出したため表示を作り直しました（'+String(err&&err.message||err).slice(0,80)+'）','ng');
+  if(renderErrs.length>5){courseLog.add('✗ 描画エラーが続くため停止しました。ページを再読み込みしてください（編集内容は端末に保存済みです）','ng');return}
+  setTimeout(()=>{try{if(editor)editor.cancelInteraction();
+    for(const ds of [courseSrc,viewer.dataSources.getByName('editMarkers')[0]]){if(!ds)continue;viewer.dataSources.remove(ds,false);viewer.dataSources.add(ds)}  // 内部のまとめ描きを一度捨てて作り直す
+    drawCourses();if(editor){editor.markers();editor.info()}}catch(e){console.error(e)}
+    viewer.useDefaultRenderLoop=true;scene.requestRender();
+    const ok=()=>{scene.postRender.removeEventListener(ok);renderTrouble=false};scene.postRender.addEventListener(ok)},50)});
 // ===== リフトと建物の立体表示（OpenStreetMap）=====
 // 読み込み順：data/lifts3d.geojson・data/buildings.geojson → 端末に保存した前回の取得結果 → ブラウザからOverpassで取得。
 // 「…書き出し」ボタンでファイルに保存でき、リポジトリの cesium/data/ に置くと次回からそれを読む。
@@ -862,7 +904,7 @@ const BLD_MAT=Cesium.Color.fromCssColorString('#f3f1ea').withAlpha(0.95),BLD_OUT
 const CHUNK=[0.005,0.004];  // まとめる単位（経度・緯度の度）＝約450m四方
 const farChunks=[];         // 距離で丸ごと省けるまとまり {tag,prims,sphere,far}
 scene.preRender.addEventListener(()=>{const p=camera.positionWC;  // 球ごと表示距離の外にあるまとまりは頂点処理もしない
-  for(const c of farChunks){const on=Cesium.Cartesian3.distance(p,c.sphere.center)-c.sphere.radius<c.far;for(const q of c.prims)if(!q.isDestroyed()&&q.show!==on)q.show=on}});
+  for(const c of farChunks){if(!c||!c.sphere||!c.prims)continue;const on=Cesium.Cartesian3.distance(p,c.sphere.center)-c.sphere.radius<c.far;for(const q of c.prims)if(!q.isDestroyed()&&q.show!==on)q.show=on}});
 const dropChunks=tag=>{for(let i=farChunks.length-1;i>=0;i--)if(farChunks[i].tag===tag)farChunks.splice(i,1)};
 const pendingPrims=new Set();let readyTimer=0;  // 別スレッドで形を作っている途中のPrimitive
 function whenReady(ps,top){for(const q of ps){q.__top=top;pendingPrims.add(q)}scene.requestRender()}
