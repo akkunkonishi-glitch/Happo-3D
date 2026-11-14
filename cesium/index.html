@@ -656,8 +656,32 @@ const editor=EDIT?(function(){
       merging?'結合：隣のコースをタップしてください（取り消すにはもう一度「結合」）':
       editSel?'選択中：'+(editSel.properties.name||'名前なし')+'（頂点'+verts().length+(vSel.length?'・選択頂点'+vSel.length:'')+'）　内側をドラッグ＝コースごと移動／頂点ドラッグ＝頂点移動／辺タップ＝追加／長押し＝削除／頂点タップ＝選ぶ':
       'コースをタップして選択。頂点以外のドラッグは地図の移動');msg=''}
-  function select(ft){const old=editSel;editSel=ft;vSel=[];merging=false;if(!ft)hideMenu();if(old)redrawFeature(old);if(ft)redrawFeature(ft);markers();info()}
+  function select(ft){const old=editSel;editSel=ft;vSel=[];merging=false;if(!ft)hideMenu();if(ft&&ft!==old)prepareHeights(ft);if(old)redrawFeature(old);if(ft)redrawFeature(ft);markers();info()}
   function live(){if(!raf)raf=requestAnimationFrame(()=>{raf=0;redrawFeature(editSel);markers()})}
+  // --- ドラッグ中の軽いプレビュー ---
+  // ドラッグ中は編集中コースの地形貼り付け（面・縁）を隠し、地形に貼らない枠線だけを動かす。他のコースには触らない。
+  // 指の動きは記録だけして、地面の位置の計算と頂点の更新は1フレームに1回まとめて行う。離したときだけ地形に貼り直す。
+  const vHeights=new WeakMap();  // コースごとの頂点の地表標高（選択時に求めておく）
+  function prepareHeights(ft){if(!ft)return;const r=courseRing(ft);Promise.all(r.map(q=>sampleGround(q[0],q[1]))).then(h=>{if(courseRing(ft)===r&&h.length===r.length)vHeights.set(ft,h)}).catch(()=>{})}
+  let pv=null;
+  function startPreview(){const ft=editSel,r=courseRing(ft);let hs=vHeights.get(ft);
+    if(!hs||hs.length!==r.length){hs=r.map(q=>globe.getHeight(Cesium.Cartographic.fromDegrees(q[0],q[1])));const known=hs.filter(h=>h!==undefined),avg=known.length?known.reduce((a,b)=>a+b,0)/known.length:(lastGround||0);hs=hs.map(h=>h===undefined?avg:h)}
+    hs=hs.slice();const pos=r.map((q,k)=>Cesium.Cartesian3.fromDegrees(q[0],q[1],hs[k]+1.5));
+    for(const e of featEnts.get(ft)||[])e.show=false;for(const e of mk.entities.values)e.show=false;  // 地形に貼ったものは一時的に隠す
+    const ents=[mk.entities.add({polyline:{positions:new Cesium.CallbackProperty(()=>pv?pv.pos:pos,false),width:3,material:ORANGE,depthFailMaterial:new Cesium.ColorMaterialProperty(ORANGE.withAlpha(0.5)),arcType:Cesium.ArcType.NONE}})];
+    if(drag)ents.push(mk.entities.add({position:new Cesium.CallbackProperty(()=>pv?pv.pos[drag?drag.i:0]:pos[0],false),point:{pixelSize:20,color:Cesium.Color.WHITE,outlineColor:ORANGE,outlineWidth:2,disableDepthTestDistance:Number.POSITIVE_INFINITY}}));
+    pv={ft,hs,pos,ents,orig:moveDrag?moveDrag.orig[0]:null,xy:null,raf:0};scene.requestRender()}
+  function queueMove(x,y){if(!pv)return;pv.xy=[x,y];if(!pv.raf)pv.raf=requestAnimationFrame(applyMove)}
+  function applyMove(){if(!pv)return;pv.raf=0;if(!pv.xy)return;const [x,y]=pv.xy;pv.xy=null;
+    const ray=camera.getPickRay(new Cesium.Cartesian2(x,y)),P=ray&&globe.pick(ray,scene);if(!P)return;
+    const c=Cesium.Cartographic.fromCartesian(P),ll=[+Cesium.Math.toDegrees(c.longitude).toFixed(7),+Cesium.Math.toDegrees(c.latitude).toFixed(7)],up=Cesium.Cartesian3.fromRadians(c.longitude,c.latitude,c.height+1.5);
+    if(drag){setV(drag.i,ll);pv.pos[drag.i]=up;pv.hs[drag.i]=c.height;if(drag.i===0){pv.pos[pv.pos.length-1]=up;pv.hs[pv.hs.length-1]=c.height}}
+    else if(moveDrag){const dx=ll[0]-moveDrag.start[0],dy=ll[1]-moveDrag.start[1];
+      editSel.geometry.coordinates=moveDrag.orig.map(r=>r.map(q=>[+(q[0]+dx).toFixed(7),+(q[1]+dy).toFixed(7)]));
+      pv.pos=pv.orig.map((q,k)=>Cesium.Cartesian3.fromDegrees(q[0]+dx,q[1]+dy,pv.hs[k]+1.5))}
+    scene.requestRender()}
+  function endPreview(){if(!pv)return;if(pv.raf){cancelAnimationFrame(pv.raf);pv.raf=0}if(pv.xy)applyMove();  // 最後の位置を反映
+    const ft=pv.ft;for(const e of pv.ents)mk.entities.remove(e);pv=null;redrawFeature(ft);markers();prepareHeights(ft)}  // ここで初めて地形に貼り直す
   // --- 頂点の操作 ---
   function setV(i,ll){const r=courseRing(editSel);r[i]=ll;if(i===0)r[r.length-1]=ll.slice()}
   function delV(i){const r=courseRing(editSel);if(r.length-1<=3){alert('コースの頂点は3点より少なくできません');return}pushUndo();r.splice(i,1);if(i===0)r[r.length-1]=r[0].slice();vSel=[];changed(editSel)}
@@ -692,7 +716,7 @@ const editor=EDIT?(function(){
   // --- 1本指：頂点をつかんだときだけ頂点操作。それ以外のドラッグは地図の移動（grabDragが担当）---
   const el=scene.canvas,loc=e=>{const r=el.getBoundingClientRect();return [e.clientX-r.left,e.clientY-r.top]};
   el.addEventListener('pointerdown',e=>{ptrs.add(e.pointerId);
-    if(ptrs.size>1){if(drag){clearTimeout(lp);drag=null;markers()}down=null;return}
+    if(ptrs.size>1){if(pv){endPreview();save()}if(drag){clearTimeout(lp);drag=null;markers()}moveDrag=null;down=null;return}
     if(drawing||(e.pointerType==='mouse'&&e.button!==0))return;  // ロープの点打ち中はそちらを優先
     const [x,y]=loc(e);down={id:e.pointerId,x,y,t:e.timeStamp,moved:false};hideMenu();
     if(!creating&&!merging&&editSel){const i=nearestVertex(x,y,24);
@@ -700,16 +724,14 @@ const editor=EDIT?(function(){
       else{const ll=pickLL(x,y);if(ll&&inRing(ll,courseRing(editSel)))moveDrag={start:ll,orig:JSON.parse(JSON.stringify(editSel.geometry.coordinates)),moved:false}}}});  // 選択中コースの内側をつかんだ
   el.addEventListener('pointermove',e=>{if(!down||e.pointerId!==down.id||ptrs.size>1)return;const [x,y]=loc(e);
     if(Math.hypot(x-down.x,y-down.y)>6)down.moved=true;
-    if(moveDrag){if(!down.moved)return;const ll=pickLL(x,y);if(!ll)return;if(!moveDrag.moved){moveDrag.moved=true;pushUndo()}
-      const dx=ll[0]-moveDrag.start[0],dy=ll[1]-moveDrag.start[1];  // 指の下の地面の移動量だけ全頂点を動かす
-      editSel.geometry.coordinates=moveDrag.orig.map(r=>r.map(q=>[+(q[0]+dx).toFixed(7),+(q[1]+dy).toFixed(7)]));live();return}
-    if(drag&&down.moved){if(!drag.moved){drag.moved=true;clearTimeout(lp);pushUndo()}const ll=pickLL(x,y);if(ll){setV(drag.i,ll);live()}}});  // 地形に沿って移動
+    if(moveDrag){if(!down.moved)return;if(!moveDrag.moved){moveDrag.moved=true;pushUndo();startPreview()}queueMove(x,y);return}  // コースごと移動（指の下の地面の移動量だけ全頂点を動かす）
+    if(drag&&down.moved){if(!drag.moved){drag.moved=true;clearTimeout(lp);pushUndo();startPreview()}queueMove(x,y)}});  // 頂点を地形に沿って移動
   el.addEventListener('pointerup',e=>{ptrs.delete(e.pointerId);if(!down||e.pointerId!==down.id)return;const [x,y]=loc(e);
-    if(moveDrag){const m=moveDrag;moveDrag=null;if(m.moved){save();info();down=null;return}}  // 動かさずに離したら通常のタップ扱い
-    if(drag){clearTimeout(lp);if(drag.moved){save();info()}else if(e.timeStamp-drag.t0>=600)delV(drag.i);else tap(x,y);drag=null;markers();down=null;return}
+    if(moveDrag){const m=moveDrag;if(m.moved){endPreview();moveDrag=null;save();info();down=null;return}moveDrag=null}  // 動かさずに離したら通常のタップ扱い
+    if(drag){clearTimeout(lp);if(drag.moved){endPreview();save();info()}else if(e.timeStamp-drag.t0>=600)delV(drag.i);else tap(x,y);drag=null;markers();down=null;return}
     if(!down.moved&&e.timeStamp-down.t<500)tap(x,y);  // 指が実際に触れていた時間で判定
     down=null});
-  el.addEventListener('pointercancel',e=>{ptrs.delete(e.pointerId);clearTimeout(lp);drag=null;down=null;if(moveDrag&&moveDrag.moved)save();moveDrag=null;markers()});
+  el.addEventListener('pointercancel',e=>{ptrs.delete(e.pointerId);clearTimeout(lp);const moved=(drag&&drag.moved)||(moveDrag&&moveDrag.moved);endPreview();drag=null;down=null;moveDrag=null;if(moved)save();markers()});
   // --- コース単位のメニュー（コースをタップすると出る）：平行移動／複製／名前変更／削除 ---
   const menu=document.createElement('div');menu.id='courseMenu';
   menu.innerHTML='<div class="t"></div><div class="h" style="font-size:11px;color:#666;margin:0 4px 4px">内側をドラッグで丸ごと移動</div><button data-a="dup">複製</button><button data-a="rename">名前変更</button><button data-a="del" class="danger">このコースを削除</button><button data-a="close">閉じる</button>';
@@ -835,7 +857,7 @@ async function drawLift(f){for(const e of liftEnts.get(f)||[])liftsSrc.entities.
   const ends=[sS.pos||c[0],sE.pos||c[c.length-1]];
   const pts=[{q:ends[0],h:OBJ3D.stationHeight},...towers.map(q=>({q,h:th})),{q:ends[1],h:OBJ3D.stationHeight}];
   const g=await Promise.all(pts.map(o=>sampleGround(o.q[0],o.q[1])));
-  towers.forEach((q,i)=>add({position:Cesium.Cartesian3.fromDegrees(q[0],q[1],g[i+1]+th/2),cylinder:{length:th+1,topRadius:0.35,bottomRadius:0.6,material:Cesium.Color.fromCssColorString('#5f6368'),distanceDisplayCondition:new Cesium.DistanceDisplayCondition(0,8000)}}));  // 支柱
+  towers.forEach((q,i)=>add({show:!EDIT,position:Cesium.Cartesian3.fromDegrees(q[0],q[1],g[i+1]+th/2),cylinder:{length:th+1,topRadius:0.35,bottomRadius:0.6,material:Cesium.Color.fromCssColorString('#5f6368'),distanceDisplayCondition:new Cesium.DistanceDisplayCondition(0,8000)}}));  // 支柱
   add({polyline:{positions:Cesium.Cartesian3.fromDegreesArrayHeights(pts.flatMap((o,i)=>[o.q[0],o.q[1],g[i]+o.h])),width:2,arcType:Cesium.ArcType.NONE,material:Cesium.Color.fromCssColorString('#1e1e1e').withAlpha(0.9)}});  // ワイヤー（駅舎の位置から張る）
   [[sS,0,c[0],c[1]],[sE,pts.length-1,c[c.length-2],c[c.length-1]]].forEach(([s_,i,a,b])=>{if(!s_.pos)return;  // 駅舎データが無い端の箱（リフトの向きに合わせる）
     const pos=Cesium.Cartesian3.fromDegrees(s_.pos[0],s_.pos[1],g[i]+OBJ3D.stationBox.height/2-0.5),hd=Math.atan2((b[0]-a[0])*Math.cos(a[1]*Math.PI/180),b[1]-a[1]);
@@ -859,7 +881,7 @@ async function drawBuildings(){bldSrc.entities.removeAll();if(!buildingsGeo)retu
       bldSrc.entities.add({position:Cesium.Cartesian3.fromDegrees(sx/k,sy/k,top+4),label:{text:f.properties.name,font:'bold 12px sans-serif',fillColor:Cesium.Color.fromCssColorString('#222'),outlineColor:Cesium.Color.WHITE,outlineWidth:3,style:Cesium.LabelStyle.FILL_AND_OUTLINE,distanceDisplayCondition:new Cesium.DistanceDisplayCondition(0,1500),verticalOrigin:Cesium.VerticalOrigin.BOTTOM}})}}
   updateBuildingVisibility();scene.requestRender();return n}
 function updateBuildingVisibility(){const c=camera.positionCartographic,above=lastGround==null?c.height:c.height-lastGround;
-  const on=document.getElementById('bldOn').checked&&above<OBJ3D.buildingShowAbove;if(bldSrc.show!==on){bldSrc.show=on;scene.requestRender()}}
+  const on=!EDIT&&document.getElementById('bldOn').checked&&above<OBJ3D.buildingShowAbove;if(bldSrc.show!==on){bldSrc.show=on;scene.requestRender()}}
 camera.changed.addEventListener(updateBuildingVisibility);camera.moveEnd.addEventListener(updateBuildingVisibility);
 // --- 読み込み ---
 const BB=()=>{const [s_,w_,n_,e_]=COURSE.bbox;return s_+','+w_+','+n_+','+e_};
@@ -901,7 +923,7 @@ if(EDIT){let sd=null,raf=0;const cv=scene.canvas,loc=e=>{const r=cv.getBoundingC
     if(s_.moved){drawLift(s_.st.f);lifts3dGeo.properties=lifts3dGeo.properties||{};lifts3dGeo.properties.edited=new Date().toISOString();
       const ok=lsSet(OBJ3D.keys.liftsEdit,lifts3dGeo);obj3dLog.add(ok?'✓ 駅舎の位置を保存しました（'+(s_.st.f.properties.name||'リフト')+'）':'✗ 駅舎の位置を端末に保存できませんでした',ok?'ok':'ng')}};
   document.addEventListener('pointerup',up,true);document.addEventListener('pointercancel',up,true);
-  obj3dLog.add('編集モード：リフト両端の駅舎の箱はドラッグで位置を直せます')}
+  obj3dLog.add('編集モード：リフト両端の駅舎の箱はドラッグで位置を直せます');obj3dLog.add('編集モード中は軽くするため建物と支柱を表示しません')}
 (async()=>{await loadObj3d('lifts');await loadObj3d('buildings')})();
 // ===== 視点スティック（左下）=====
 // FPSの右スティックと同じ：左右に倒すとその場で左右に回り、上下に倒すと見上げ・見下ろし。カメラの位置は変えない。
