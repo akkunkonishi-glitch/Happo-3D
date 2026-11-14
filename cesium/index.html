@@ -131,7 +131,7 @@ async function copyText(txt){  // クリップボードにコピー（使えな�
 async function gsiHeights(z,x,y,signal){
   const GSI='https://cyberjapandata.gsi.go.jp/xyz/';
   async function heights(layer,lz,lx,ly,sig){
-    const r=await fetch(GSI+layer+'/'+lz+'/'+lx+'/'+ly+'.png',{signal:sig});if(!r.ok)return null;
+    const r=await fetch(GSI+layer+'/'+lz+'/'+lx+'/'+ly+'.png',{signal:sig,priority:'low'});if(!r.ok)return null;
     const buf=new Uint8Array(await r.arrayBuffer());
     const u32=o=>((buf[o]<<24)|(buf[o+1]<<16)|(buf[o+2]<<8)|buf[o+3])>>>0;
     let o=8,W=0,H=0,depth=0,ctype=0,inter=0,plte=null,trns=null;const idat=[];
@@ -205,9 +205,11 @@ const viewer=new Cesium.Viewer('cesium',{
   animation:false,timeline:false,fullscreenButton:false,infoBox:false,selectionIndicator:false,
   requestRenderMode:true,maximumRenderTimeChange:Infinity,msaaSamples:1});
 const scene=viewer.scene,globe=scene.globe,camera=viewer.camera,ssc=scene.screenSpaceCameraController;
+// 航空写真を優先して読む：写真の同時接続数を増やし、標高タイルは低い優先度で取得する（地形の細かさは変えない）
+Cesium.RequestScheduler.requestsByServer['cyberjapandata.gsi.go.jp:443']=24;
 // iPad向けに控えめな設定
 globe.cartographicLimitRectangle=limitRect;   // 北アルプス範囲の外は描画しない
-globe.maximumScreenSpaceError=3;               // 既定2より粗め＝読み込むタイルを減らす
+globe.maximumScreenSpaceError=2;               // 地形の細かさは標準のまま
 globe.tileCacheSize=80;globe.loadingDescendantLimit=8;globe.preloadSiblings=false;
 globe.depthTestAgainstTerrain=true;globe.enableLighting=false;globe.baseColor=Cesium.Color.fromCssColorString('#c5d7e4');
 scene.fog.enabled=true;viewer.shadows=false;
@@ -791,10 +793,13 @@ const OBJ3D={
   levelHeight:3.5,      // 1階あたりの高さ(m)
   defaultLevels:2,      // height も building:levels も無い建物の階数
   buildingShowAbove:2500, // カメラが地表からこの高さ(m)以内のときだけ建物を表示
+  buildingFar:3000,     // カメラからこの距離(m)より遠い建物は描かない
+  pylonFar:4000,        // カメラからこの距離(m)より遠い支柱は描かない（この距離では1px未満）
+  stationFar:8000,      // 駅舎（箱・OSMの面）の表示距離(m)
   skip3d:['station','goods','zip_line','magic_carpet','pylon']  // 立体にしない種類
 };
 const obj3dLog={lines:[],add(t,c){this.lines.push({t,c});const el=document.getElementById('obj3dStatus');el.textContent='';for(const l of this.lines.slice(-8)){const d=document.createElement('div');d.textContent=l.t;if(l.c)d.className=l.c;el.appendChild(d)}}};
-const liftsSrc=new Cesium.CustomDataSource('lifts3d'),bldSrc=new Cesium.CustomDataSource('buildings');viewer.dataSources.add(liftsSrc);viewer.dataSources.add(bldSrc);
+const liftPrims=scene.primitives.add(new Cesium.PrimitiveCollection()),bldPrims=scene.primitives.add(new Cesium.PrimitiveCollection());  // 建物・支柱・駅舎はPrimitiveにまとめて描く
 let lifts3dGeo=null,buildingsGeo=null;
 // --- 地表の標高（地形と同じ地理院DEMのズーム14タイルから補間）---
 const groundTiles=new Map();
@@ -847,41 +852,83 @@ async function overpassQuery(q,label){
     catch(e){obj3dLog.add('✗ '+label+'：'+host+'：'+whyFailed(e),'ng')}finally{clearTimeout(tm)}}
   throw new Error('すべてのOverpassミラーで取得できませんでした')}
 // --- 描画 ---
-const liftEnts=new Map(),isLiftF=f=>f.geometry&&f.geometry.type==='LineString',isStationF=f=>f.properties&&f.properties.kind==='station'&&f.geometry.type==='Polygon';
-const ST_MAT=Cesium.Color.fromCssColorString('#e9e6dc'),ST_OUT=Cesium.Color.fromCssColorString('#7a7a7a');
-async function drawLift(f){for(const e of liftEnts.get(f)||[])liftsSrc.entities.remove(e);const out=[],add=o=>{out.push(liftsSrc.entities.add(o))};
-  const p=f.properties,c=f.geometry.coordinates;if(!c||c.length<2){liftEnts.set(f,out);return 0}
+// --- 描画：Entityを1つずつ描かず、Primitiveにまとめて一括で描く（GPUへの描画命令が数個で済む）---
+// 建物と支柱は約450m四方ごとに1つのPrimitiveにまとめる。各まとまりは自分の範囲を囲む球(boundingSphere)を持つので、
+// 画面の外のまとまりは描画されない（フラスタムカリング）。高さは地表の標高から絶対値で与えるので球は実物どおりの位置になる。
+// さらに1棟・1本ごとに表示距離(distanceDisplayCondition)を持たせ、遠い建物・支柱は描かない。航空写真と地形には距離制限を付けない。
+const isLiftF=f=>f.geometry&&f.geometry.type==='LineString',isStationF=f=>f.properties&&f.properties.kind==='station'&&f.geometry.type==='Polygon';
+const ST_MAT=Cesium.Color.fromCssColorString('#e9e6dc'),ST_OUT=Cesium.Color.fromCssColorString('#7a7a7a'),PYLON_C=Cesium.Color.fromCssColorString('#5f6368'),WIRE_C=Cesium.Color.fromCssColorString('#1e1e1e').withAlpha(0.9);
+const BLD_MAT=Cesium.Color.fromCssColorString('#f3f1ea').withAlpha(0.95),BLD_OUT=Cesium.Color.fromCssColorString('#8a8a8a');
+const CHUNK=[0.005,0.004];  // まとめる単位（経度・緯度の度）＝約450m四方
+const farChunks=[];         // 距離で丸ごと省けるまとまり {tag,prims,sphere,far}
+scene.preRender.addEventListener(()=>{const p=camera.positionWC;  // 球ごと表示距離の外にあるまとまりは頂点処理もしない
+  for(const c of farChunks){const on=Cesium.Cartesian3.distance(p,c.sphere.center)-c.sphere.radius<c.far;for(const q of c.prims)if(!q.isDestroyed()&&q.show!==on)q.show=on}});
+const dropChunks=tag=>{for(let i=farChunks.length-1;i>=0;i--)if(farChunks[i].tag===tag)farChunks.splice(i,1)};
+const pendingPrims=new Set();let readyTimer=0;  // 別スレッドで形を作っている途中のPrimitive
+function whenReady(ps,top){for(const q of ps){q.__top=top;pendingPrims.add(q)}scene.requestRender()}
+scene.postRender.addEventListener(()=>{for(const q of pendingPrims)if(q.isDestroyed()||q.ready)pendingPrims.delete(q);  // 表示中のものが出来上がるまでだけ描き直しを続け、出来たら止める
+  if(!readyTimer&&[...pendingPrims].some(q=>q.show&&q.__top.show))readyTimer=setTimeout(()=>{readyTimer=0;scene.requestRender()},150)});
+const instAttrs=(c,far)=>({color:Cesium.ColorGeometryInstanceAttribute.fromColor(c),distanceDisplayCondition:new Cesium.DistanceDisplayConditionGeometryInstanceAttribute(0,far),show:new Cesium.ShowGeometryInstanceAttribute(true)});
+function batch(group,tag,items,o){const chunks=new Map(),made=[];
+  for(const it of items){const k=o.chunk?Math.floor(it.ll[0]/CHUNK[0])+'/'+Math.floor(it.ll[1]/CHUNK[1]):'all';if(!chunks.has(k))chunks.set(k,[]);chunks.get(k).push(it)}
+  for(const list of chunks.values()){const ps=[group.add(new Cesium.Primitive({geometryInstances:list.map(i=>i.fill),appearance:new Cesium.PerInstanceColorAppearance({translucent:!!o.translucent,closed:true}),asynchronous:!!o.async,allowPicking:!!o.pick}))];
+    const lines=list.filter(i=>i.line).map(i=>i.line);
+    if(lines.length)ps.push(group.add(new Cesium.Primitive({geometryInstances:lines,appearance:new Cesium.PerInstanceColorAppearance({flat:true,translucent:false}),asynchronous:!!o.async,allowPicking:false})));
+    farChunks.push({tag,prims:ps,far:o.far,sphere:Cesium.BoundingSphere.fromPoints(list.flatMap(i=>i.pts))});made.push(...ps)}
+  whenReady(made,o.top);return made}
+function prism(ring,base,top,fillC,lineC,far,id){const h=new Cesium.PolygonHierarchy(Cesium.Cartesian3.fromDegreesArray(ring.flat()));  // 押し出した多角形（建物・OSMの駅舎）
+  return {ll:ringCenter(ring),pts:ring.flatMap(q=>[Cesium.Cartesian3.fromDegrees(q[0],q[1],base),Cesium.Cartesian3.fromDegrees(q[0],q[1],top)]),
+    fill:new Cesium.GeometryInstance({id,geometry:new Cesium.PolygonGeometry({polygonHierarchy:h,height:base,extrudedHeight:top,vertexFormat:Cesium.PerInstanceColorAppearance.VERTEX_FORMAT}),attributes:instAttrs(fillC,far)}),
+    line:lineC&&new Cesium.GeometryInstance({id,geometry:new Cesium.PolygonOutlineGeometry({polygonHierarchy:h,height:base,extrudedHeight:top}),attributes:instAttrs(lineC,far)})}}
+// --- リフト ---
+const liftData=new Map();let pylonGroup=null,stationGroup=null,wireColl=null,stationAreas=[];
+async function computeLift(f){const p=f.properties,c=f.geometry.coordinates;if(!c||c.length<2)return null;
   if(!p.stations)p.stations=computeStations(c,lifts3dGeo.features.filter(isStationF));  // 古いデータには駅の情報が無いので補う
   const th=p.towerHeight||OBJ3D.towerHeight[p.aerialway]||OBJ3D.towerHeight.default,towers=p.towers||[];
   const st=side=>p.stations.find(x=>x.side===side)||{},sS=st('start'),sE=st('end');
-  const ends=[sS.pos||c[0],sE.pos||c[c.length-1]];
-  const pts=[{q:ends[0],h:OBJ3D.stationHeight},...towers.map(q=>({q,h:th})),{q:ends[1],h:OBJ3D.stationHeight}];
+  const pts=[{q:sS.pos||c[0],h:OBJ3D.stationHeight},...towers.map(q=>({q,h:th})),{q:sE.pos||c[c.length-1],h:OBJ3D.stationHeight}];
   const g=await Promise.all(pts.map(o=>sampleGround(o.q[0],o.q[1])));
-  towers.forEach((q,i)=>add({show:!EDIT,position:Cesium.Cartesian3.fromDegrees(q[0],q[1],g[i+1]+th/2),cylinder:{length:th+1,topRadius:0.35,bottomRadius:0.6,material:Cesium.Color.fromCssColorString('#5f6368'),distanceDisplayCondition:new Cesium.DistanceDisplayCondition(0,8000)}}));  // 支柱
-  add({polyline:{positions:Cesium.Cartesian3.fromDegreesArrayHeights(pts.flatMap((o,i)=>[o.q[0],o.q[1],g[i]+o.h])),width:2,arcType:Cesium.ArcType.NONE,material:Cesium.Color.fromCssColorString('#1e1e1e').withAlpha(0.9)}});  // ワイヤー（駅舎の位置から張る）
-  [[sS,0,c[0],c[1]],[sE,pts.length-1,c[c.length-2],c[c.length-1]]].forEach(([s_,i,a,b])=>{if(!s_.pos)return;  // 駅舎データが無い端の箱（リフトの向きに合わせる）
-    const pos=Cesium.Cartesian3.fromDegrees(s_.pos[0],s_.pos[1],g[i]+OBJ3D.stationBox.height/2-0.5),hd=Math.atan2((b[0]-a[0])*Math.cos(a[1]*Math.PI/180),b[1]-a[1]);
-    const e=liftsSrc.entities.add({position:pos,orientation:Cesium.Transforms.headingPitchRollQuaternion(pos,new Cesium.HeadingPitchRoll(hd,0,0)),
-      box:{dimensions:new Cesium.Cartesian3(OBJ3D.stationBox.size,OBJ3D.stationBox.size,OBJ3D.stationBox.height+1),material:ST_MAT,outline:true,outlineColor:ST_OUT,distanceDisplayCondition:new Cesium.DistanceDisplayCondition(0,8000)}});
-    e.__st={f,station:s_};out.push(e)});
-  liftEnts.set(f,out);scene.requestRender();return towers.length}
-async function drawLifts(){liftsSrc.entities.removeAll();liftEnts.clear();if(!lifts3dGeo)return 0;let nT=0;
+  const old=liftData.get(f),Ld={f,c,th,towers,pts,g,sS,sE,wire:old&&old.wire};liftData.set(f,Ld);return Ld}
+const wirePositions=Ld=>Cesium.Cartesian3.fromDegreesArrayHeights(Ld.pts.flatMap((o,i)=>[o.q[0],o.q[1],Ld.g[i]+o.h]));
+function boxPose(Ld,side){const s_=side==='start'?Ld.sS:Ld.sE;if(!s_.pos)return null;const c=Ld.c,i=side==='start'?0:Ld.pts.length-1,a=side==='start'?c[0]:c[c.length-2],b=side==='start'?c[1]:c[c.length-1];
+  const pos=Cesium.Cartesian3.fromDegrees(s_.pos[0],s_.pos[1],Ld.g[i]+OBJ3D.stationBox.height/2-0.5),hd=Math.atan2((b[0]-a[0])*Math.cos(a[1]*Math.PI/180),b[1]-a[1]);  // リフトの向きに合わせる
+  return {pos,hd,station:s_}}
+const boxDims=()=>new Cesium.Cartesian3(OBJ3D.stationBox.size,OBJ3D.stationBox.size,OBJ3D.stationBox.height+1);
+function boxItem(Ld,side){const bp=boxPose(Ld,side);if(!bp)return null;const id={__st:{f:Ld.f,station:bp.station}},m=Cesium.Transforms.headingPitchRollToFixedFrame(bp.pos,new Cesium.HeadingPitchRoll(bp.hd,0,0)),r=OBJ3D.stationBox.size;
+  return {ll:bp.station.pos,pts:[bp.pos],id,
+    fill:new Cesium.GeometryInstance({id,modelMatrix:m,geometry:Cesium.BoxGeometry.fromDimensions({dimensions:boxDims(),vertexFormat:Cesium.PerInstanceColorAppearance.VERTEX_FORMAT}),attributes:instAttrs(ST_MAT,OBJ3D.stationFar)}),
+    line:new Cesium.GeometryInstance({id,modelMatrix:m,geometry:Cesium.BoxOutlineGeometry.fromDimensions({dimensions:boxDims()}),attributes:instAttrs(ST_OUT,OBJ3D.stationFar)}),
+    sphere:new Cesium.BoundingSphere(bp.pos,r)}}
+function buildStations(){if(stationGroup)liftPrims.remove(stationGroup);dropChunks('st');stationGroup=liftPrims.add(new Cesium.PrimitiveCollection());  // 駅舎（OSMの面＋自動の箱）を1つにまとめる
+  const items=[...stationAreas];for(const Ld of liftData.values())for(const side of ['start','end']){const it=boxItem(Ld,side);if(it){it.pts=[Cesium.Cartesian3.add(it.sphere.center,new Cesium.Cartesian3(it.sphere.radius,0,0),new Cesium.Cartesian3()),Cesium.Cartesian3.subtract(it.sphere.center,new Cesium.Cartesian3(it.sphere.radius,0,0),new Cesium.Cartesian3())];items.push(it)}}
+  if(items.length)batch(stationGroup,'st',items,{far:OBJ3D.stationFar,pick:EDIT,async:false,top:liftPrims});scene.requestRender()}
+function buildPylons(){if(pylonGroup)liftPrims.remove(pylonGroup);dropChunks('pylon');pylonGroup=null;if(EDIT)return;  // 編集モードでは支柱を描かない
+  pylonGroup=liftPrims.add(new Cesium.PrimitiveCollection());const items=[];
+  for(const Ld of liftData.values())Ld.towers.forEach((q,k)=>{const pos=Cesium.Cartesian3.fromDegrees(q[0],q[1],Ld.g[k+1]+Ld.th/2);
+    items.push({ll:q,pts:[pos],fill:new Cesium.GeometryInstance({modelMatrix:Cesium.Transforms.eastNorthUpToFixedFrame(pos),geometry:new Cesium.CylinderGeometry({length:Ld.th+1,topRadius:0.35,bottomRadius:0.6,slices:24,vertexFormat:Cesium.PerInstanceColorAppearance.VERTEX_FORMAT}),attributes:instAttrs(PYLON_C,OBJ3D.pylonFar)})})});
+  if(items.length)batch(pylonGroup,'pylon',items,{chunk:true,far:OBJ3D.pylonFar,async:true,top:liftPrims})}
+function setWire(Ld){if(!wireColl)wireColl=liftPrims.add(new Cesium.PolylineCollection());  // ワイヤーは線の集まり1つにまとめる（駅舎を動かしたときは位置だけ差し替え）
+  if(Ld.wire)Ld.wire.positions=wirePositions(Ld);else Ld.wire=wireColl.add({positions:wirePositions(Ld),width:2,material:Cesium.Material.fromType('Color',{color:WIRE_C})})}
+async function updateLift(f){const Ld=await computeLift(f);if(Ld)setWire(Ld);scene.requestRender();return Ld}  // 1本だけ更新（駅舎のドラッグ用）
+async function drawLifts(){liftPrims.removeAll();pylonGroup=stationGroup=wireColl=null;liftData.clear();stationAreas=[];dropChunks('st');dropChunks('pylon');if(!lifts3dGeo)return 0;
   for(const f of lifts3dGeo.features.filter(isStationF)){const r=f.geometry.coordinates[0];  // OSMの駅舎の面
     const gs=await Promise.all(r.slice(0,-1).map(q=>sampleGround(q[0],q[1]))),base=Math.min(...gs)-1,top=Math.max(...gs)+(f.properties.height||OBJ3D.stationBox.height);
-    liftsSrc.entities.add({polygon:{hierarchy:new Cesium.PolygonHierarchy(Cesium.Cartesian3.fromDegreesArray(r.flat())),height:base,extrudedHeight:top,material:ST_MAT,outline:true,outlineColor:ST_OUT,distanceDisplayCondition:new Cesium.DistanceDisplayCondition(0,8000)}})}
-  liftsSrc.entities.suspendEvents();for(const f of lifts3dGeo.features.filter(isLiftF))nT+=await drawLift(f);liftsSrc.entities.resumeEvents();
-  scene.requestRender();return nT}
-async function drawBuildings(){bldSrc.entities.removeAll();if(!buildingsGeo)return;const ddc=new Cesium.DistanceDisplayCondition(0,OBJ3D.buildingShowAbove+500);
-  const mat=Cesium.Color.fromCssColorString('#f3f1ea').withAlpha(0.95),outline=Cesium.Color.fromCssColorString('#8a8a8a');let n=0;
+    stationAreas.push(prism(r,base,top,ST_MAT,ST_OUT,OBJ3D.stationFar))}
+  const Ls=(await Promise.all(lifts3dGeo.features.filter(isLiftF).map(computeLift))).filter(Boolean);
+  for(const Ld of Ls){Ld.wire=null;setWire(Ld)}
+  buildStations();buildPylons();scene.requestRender();return Ls.reduce((n,Ld)=>n+Ld.towers.length,0)}
+// --- 建物 ---
+async function drawBuildings(){bldPrims.removeAll();dropChunks('bld');if(!buildingsGeo)return 0;const items=[],labels=new Cesium.LabelCollection({scene});let n=0;
   for(const f of buildingsGeo.features){const ring=f.geometry.coordinates[0];if(!ring||ring.length<4)continue;
     const step=Math.max(1,Math.floor((ring.length-1)/8)),samples=await Promise.all(ring.slice(0,-1).filter((_,i)=>i%step===0).map(q=>sampleGround(q[0],q[1])));
     const base=Math.min(...samples)-1,top=Math.max(...samples)+(f.properties.height||OBJ3D.defaultLevels*OBJ3D.levelHeight);  // 斜面でも埋もれ・浮きが出ないよう低い側に底、高い側から高さを取る
-    bldSrc.entities.add({polygon:{hierarchy:new Cesium.PolygonHierarchy(Cesium.Cartesian3.fromDegreesArray(ring.flat())),height:base,extrudedHeight:top,material:mat,outline:true,outlineColor:outline,distanceDisplayCondition:ddc}});n++;
-    if(f.properties.name){let sx=0,sy=0;ring.slice(0,-1).forEach(q=>{sx+=q[0];sy+=q[1]});const k=ring.length-1;
-      bldSrc.entities.add({position:Cesium.Cartesian3.fromDegrees(sx/k,sy/k,top+4),label:{text:f.properties.name,font:'bold 12px sans-serif',fillColor:Cesium.Color.fromCssColorString('#222'),outlineColor:Cesium.Color.WHITE,outlineWidth:3,style:Cesium.LabelStyle.FILL_AND_OUTLINE,distanceDisplayCondition:new Cesium.DistanceDisplayCondition(0,1500),verticalOrigin:Cesium.VerticalOrigin.BOTTOM}})}}
-  updateBuildingVisibility();scene.requestRender();return n}
+    items.push(prism(ring,base,top,BLD_MAT,BLD_OUT,OBJ3D.buildingFar));n++;
+    if(f.properties.name){const c=ringCenter(ring);
+      labels.add({position:Cesium.Cartesian3.fromDegrees(c[0],c[1],top+4),text:f.properties.name,font:'bold 12px sans-serif',fillColor:Cesium.Color.fromCssColorString('#222'),outlineColor:Cesium.Color.WHITE,outlineWidth:3,style:Cesium.LabelStyle.FILL_AND_OUTLINE,distanceDisplayCondition:new Cesium.DistanceDisplayCondition(0,1500),verticalOrigin:Cesium.VerticalOrigin.BOTTOM})}}
+  if(items.length)batch(bldPrims,'bld',items,{chunk:true,far:OBJ3D.buildingFar,translucent:true,async:true,top:bldPrims});
+  bldPrims.add(labels);updateBuildingVisibility();scene.requestRender();return n}
 function updateBuildingVisibility(){const c=camera.positionCartographic,above=lastGround==null?c.height:c.height-lastGround;
-  const on=!EDIT&&document.getElementById('bldOn').checked&&above<OBJ3D.buildingShowAbove;if(bldSrc.show!==on){bldSrc.show=on;scene.requestRender()}}
+  const on=!EDIT&&document.getElementById('bldOn').checked&&above<OBJ3D.buildingShowAbove;if(bldPrims.show!==on){bldPrims.show=on;scene.requestRender()}}
 camera.changed.addEventListener(updateBuildingVisibility);camera.moveEnd.addEventListener(updateBuildingVisibility);
 // --- 読み込み ---
 const BB=()=>{const [s_,w_,n_,e_]=COURSE.bbox;return s_+','+w_+','+n_+','+e_};
@@ -904,7 +951,7 @@ async function loadObj3d(kind,forceOsm){const S=OBJ3D_SRC[kind];let geo=null,src
   S.set(geo);const n=geo.features.length;obj3dCount[kind]=n+'件（'+src+'）';showObj3dInfo();
   const m=await S.draw();if(kind==='lifts'){const L=geo.features.filter(isLiftF),boxes=L.reduce((k,f)=>k+(f.properties.stations||[]).filter(x=>x.pos).length,0);obj3dCount[kind]=L.length+'本・支柱'+m+'本・駅舎の箱'+boxes+'（'+src+'）'}showObj3dInfo();obj3dLog.add('✓ '+S.label+'：'+n+'件を表示','ok')}
 function downloadGeo(geo,name){if(!geo){alert('まだデータがありません');return}const a=document.createElement('a');a.href=URL.createObjectURL(new Blob([JSON.stringify(geo)],{type:'application/geo+json'}));a.download=name;document.body.appendChild(a);a.click();setTimeout(()=>{URL.revokeObjectURL(a.href);a.remove()},1000)}
-document.getElementById('liftsOn').onchange=e=>{liftsSrc.show=e.target.checked;scene.requestRender()};
+document.getElementById('liftsOn').onchange=e=>{liftPrims.show=e.target.checked;scene.requestRender()};
 document.getElementById('bldOn').onchange=()=>updateBuildingVisibility();
 document.getElementById('liftsExport').onclick=()=>downloadGeo(lifts3dGeo,'lifts3d.geojson');
 document.getElementById('bldExport').onclick=()=>downloadGeo(buildingsGeo,'buildings.geojson');
@@ -912,15 +959,20 @@ document.getElementById('obj3dRefetch').onclick=async()=>{if(!confirm('リフト
   await loadObj3d('lifts',true);await loadObj3d('buildings',true)};
 showObj3dInfo();
 // 編集モード：駅舎の箱をドラッグすると地表に沿って動く（ワイヤーも追従）。位置は端末に保存し、lifts3d書き出しに含まれる
-if(EDIT){let sd=null,raf=0;const cv=scene.canvas,loc=e=>{const r=cv.getBoundingClientRect();return [e.clientX-r.left,e.clientY-r.top]};
+if(EDIT){let sd=null,raf=0,pvEnt=null;const cv=scene.canvas,loc=e=>{const r=cv.getBoundingClientRect();return [e.clientX-r.left,e.clientY-r.top]};
   const ground=(x,y)=>{const ray=camera.getPickRay(new Cesium.Cartesian2(x,y)),p=ray&&globe.pick(ray,scene);if(!p)return null;const c=Cesium.Cartographic.fromCartesian(p);return [+Cesium.Math.toDegrees(c.longitude).toFixed(7),+Cesium.Math.toDegrees(c.latitude).toFixed(7)]};
+  const setShown=(id,v)=>{if(stationGroup)for(let i=0;i<stationGroup.length;i++){const q=stationGroup.get(i);try{const a=q.getGeometryInstanceAttributes(id);if(a)a.show=Cesium.ShowGeometryInstanceAttribute.toValue(v,a.show)}catch(e){}}};
+  // ドラッグ中は、まとめて描いた箱のうち動かす1つだけを隠し、代わりに仮の箱を動かす（まとまり全体は作り直さない）
+  function startStPreview(s_){setShown(s_.inst,false);const pose=()=>{const Ld=liftData.get(s_.st.f);return Ld&&boxPose(Ld,s_.st.station.side)};
+    pvEnt=viewer.entities.add({position:new Cesium.CallbackProperty(()=>{const b=pose();return b&&b.pos},false),orientation:new Cesium.CallbackProperty(()=>{const b=pose();return b&&Cesium.Transforms.headingPitchRollQuaternion(b.pos,new Cesium.HeadingPitchRoll(b.hd,0,0))},false),
+      box:{dimensions:boxDims(),material:ST_MAT,outline:true,outlineColor:ST_OUT}})}
   // 地図の操作やコース編集より先に判定するため、documentの捕捉段階で受ける
-  document.addEventListener('pointerdown',e=>{if(e.target!==cv||sd||drawing)return;const [x,y]=loc(e),hit=scene.pick(new Cesium.Cartesian2(x,y)),ent=hit&&hit.id;
-    if(ent&&ent.__st&&document.getElementById('liftsOn').checked){sd={id:e.pointerId,st:ent.__st,moved:false};e.stopPropagation()}},true);
+  document.addEventListener('pointerdown',e=>{if(e.target!==cv||sd||drawing)return;const [x,y]=loc(e),hit=scene.pick(new Cesium.Cartesian2(x,y)),id=hit&&hit.id;
+    if(id&&id.__st&&document.getElementById('liftsOn').checked){sd={id:e.pointerId,st:id.__st,inst:id,moved:false};e.stopPropagation()}},true);
   document.addEventListener('pointermove',e=>{if(!sd||e.pointerId!==sd.id)return;e.stopPropagation();const ll=ground(...loc(e));if(!ll)return;
-    sd.st.station.pos=ll;sd.st.station.source='edited';sd.moved=true;if(!raf)raf=requestAnimationFrame(()=>{raf=0;if(sd)drawLift(sd.st.f)})},true);
-  const up=e=>{if(!sd||e.pointerId!==sd.id)return;e.stopPropagation();const s_=sd;sd=null;
-    if(s_.moved){drawLift(s_.st.f);lifts3dGeo.properties=lifts3dGeo.properties||{};lifts3dGeo.properties.edited=new Date().toISOString();
+    sd.st.station.pos=ll;sd.st.station.source='edited';if(!sd.moved){sd.moved=true;startStPreview(sd)}if(!raf)raf=requestAnimationFrame(()=>{raf=0;if(sd)updateLift(sd.st.f)})},true);  // 1フレームに1回だけ更新
+  const up=async e=>{if(!sd||e.pointerId!==sd.id)return;e.stopPropagation();const s_=sd;sd=null;
+    if(s_.moved){await updateLift(s_.st.f);if(pvEnt){viewer.entities.remove(pvEnt);pvEnt=null}buildStations();lifts3dGeo.properties=lifts3dGeo.properties||{};lifts3dGeo.properties.edited=new Date().toISOString();
       const ok=lsSet(OBJ3D.keys.liftsEdit,lifts3dGeo);obj3dLog.add(ok?'✓ 駅舎の位置を保存しました（'+(s_.st.f.properties.name||'リフト')+'）':'✗ 駅舎の位置を端末に保存できませんでした',ok?'ok':'ng')}};
   document.addEventListener('pointerup',up,true);document.addEventListener('pointercancel',up,true);
   obj3dLog.add('編集モード：リフト両端の駅舎の箱はドラッグで位置を直せます');obj3dLog.add('編集モード中は軽くするため建物と支柱を表示しません')}
