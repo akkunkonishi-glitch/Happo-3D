@@ -985,8 +985,9 @@ const OBJ3D={
   stationNear:40,       // OSMの駅舎の面がリフトの端からこの距離(m)以内なら、そちらを優先して箱は置かない
   levelHeight:3.5,      // 1階あたりの高さ(m)
   defaultLevels:2,      // height も building:levels も無い建物の階数
-  buildingShowAbove:2500, // カメラが地表からこの高さ(m)以内のときだけ建物を表示
-  buildingFar:3000,     // カメラからこの距離(m)より遠い建物は描かない
+  buildingFar:2000,     // カメラからこの距離(m)以内の建物を表示（高さでは切らない）
+  labelFar:2000,        // 建物名ラベルを表示する距離(m)
+  kmlMargin:50,         // 管理区域KMLの境界をこの距離(m)だけ外側に広げて建物を含める
   pylonFar:4000,        // カメラからこの距離(m)より遠い支柱は描かない（この距離では1px未満）
   stationFar:8000,      // 駅舎（箱・OSMの面）の表示距離(m)
   skip3d:['station','goods','zip_line','magic_carpet','pylon']  // 立体にしない種類
@@ -1117,18 +1118,33 @@ async function drawBuildings(){bldPrims.removeAll();dropChunks('bld');if(!buildi
     const base=Math.min(...samples)-1,top=Math.max(...samples)+(f.properties.height||OBJ3D.defaultLevels*OBJ3D.levelHeight);  // 斜面でも埋もれ・浮きが出ないよう低い側に底、高い側から高さを取る
     items.push(prism(ring,base,top,BLD_MAT,BLD_OUT,OBJ3D.buildingFar));n++;
     if(f.properties.name){const c=ringCenter(ring);
-      labels.add({position:Cesium.Cartesian3.fromDegrees(c[0],c[1],top+4),text:f.properties.name,font:'bold 12px sans-serif',fillColor:Cesium.Color.fromCssColorString('#222'),outlineColor:Cesium.Color.WHITE,outlineWidth:3,style:Cesium.LabelStyle.FILL_AND_OUTLINE,distanceDisplayCondition:new Cesium.DistanceDisplayCondition(0,1500),verticalOrigin:Cesium.VerticalOrigin.BOTTOM})}}
+      labels.add({position:Cesium.Cartesian3.fromDegrees(c[0],c[1],top+4),text:f.properties.name,font:'bold 12px sans-serif',fillColor:Cesium.Color.fromCssColorString('#222'),outlineColor:Cesium.Color.WHITE,outlineWidth:3,style:Cesium.LabelStyle.FILL_AND_OUTLINE,distanceDisplayCondition:new Cesium.DistanceDisplayCondition(0,OBJ3D.labelFar),verticalOrigin:Cesium.VerticalOrigin.BOTTOM})}}
   if(items.length)batch(bldPrims,'bld',items,{chunk:true,far:OBJ3D.buildingFar,translucent:true,async:true,top:bldPrims});
   bldPrims.add(labels);updateBuildingVisibility();scene.requestRender();return n}
-function updateBuildingVisibility(){const c=camera.positionCartographic,above=lastGround==null?c.height:c.height-lastGround;
-  const on=!EDIT&&document.getElementById('bldOn').checked&&above<OBJ3D.buildingShowAbove;if(bldPrims.show!==on){bldPrims.show=on;scene.requestRender()}}
+// 建物の表示は「チェック」と「編集モードでない」だけで決め、遠さは1棟ごとの表示距離(2km)に任せる。
+// （以前はカメラの地表からの高さで丸ごと隠していたが、地表の高さが取れないと海抜で判定してしまい、山の上では常に隠れていた）
+function updateBuildingVisibility(){const on=!EDIT&&document.getElementById('bldOn').checked;if(bldPrims.show!==on){bldPrims.show=on;scene.requestRender()}}
 camera.changed.addEventListener(updateBuildingVisibility);camera.moveEnd.addEventListener(updateBuildingVisibility);
 // --- 読み込み ---
 const BB=()=>{const [s_,w_,n_,e_]=COURSE.bbox;return s_+','+w_+','+n_+','+e_};
 // 管理区域KMLの範囲：建物はこの多角形の内側だけ取得・表示する
-const KML_POLY=()=>boundary.map(q=>q[1]+' '+q[0]).join(' ');
+const KML_RING=boundary.filter((q,i)=>i===0||q[0]!==boundary[i-1][0]||q[1]!==boundary[i-1][1]).filter((q,i,a)=>!(i===a.length-1&&q[0]===a[0][0]&&q[1]===a[0][1]));  // 重複点を除いた境界
+const KML_KX=111320*Math.cos(KML_RING[0][1]*Math.PI/180),KML_KY=110540;
+// 境界を m メートル外側に広げた多角形（Overpassの取得範囲用）。各頂点を外向きの角の二等分線方向へずらす
+function kmlExpanded(m){const P=KML_RING.map(q=>[q[0]*KML_KX,q[1]*KML_KY]),n=P.length;let A=0;for(let i=0;i<n;i++){const a=P[i],b=P[(i+1)%n];A+=a[0]*b[1]-b[0]*a[1]}
+  const sg=A>0?1:-1,nrm=(a,b)=>{const dx=b[0]-a[0],dy=b[1]-a[1],L=Math.hypot(dx,dy)||1;return [sg*dy/L,-sg*dx/L]};  // 外向きの法線
+  return P.map((p,i)=>{const n1=nrm(P[(i-1+n)%n],p),n2=nrm(p,P[(i+1)%n]);let bx=n1[0]+n2[0],by=n1[1]+n2[1];const L=Math.hypot(bx,by)||1;bx/=L;by/=L;
+    const k=Math.min(m/Math.max(bx*n1[0]+by*n1[1],0.3),m*3);return [(p[0]+bx*k)/KML_KX,(p[1]+by*k)/KML_KY]})}
+const KML_POLY=()=>kmlExpanded(OBJ3D.kmlMargin).map(q=>q[1].toFixed(6)+' '+q[0].toFixed(6)).join(' ');
+// 境界までの最短距離(m)
+function kmlDist(q){let d=Infinity;const x=q[0]*KML_KX,y=q[1]*KML_KY,n=KML_RING.length;
+  for(let i=0;i<n;i++){const a=KML_RING[i],b=KML_RING[(i+1)%n],ax=a[0]*KML_KX,ay=a[1]*KML_KY,dx=b[0]*KML_KX-ax,dy=b[1]*KML_KY-ay,L=dx*dx+dy*dy,t=L?Math.max(0,Math.min(1,((x-ax)*dx+(y-ay)*dy)/L)):0;d=Math.min(d,Math.hypot(x-ax-t*dx,y-ay-t*dy))}
+  return d}
+// 多角形の重心（面積で重み付け）。面積がほぼ0なら頂点の平均
+function polyCentroid(r){let A=0,cx=0,cy=0;const o=r[0];for(let i=0;i<r.length-1;i++){const x0=(r[i][0]-o[0])*KML_KX,y0=(r[i][1]-o[1])*KML_KY,x1=(r[i+1][0]-o[0])*KML_KX,y1=(r[i+1][1]-o[1])*KML_KY,c=x0*y1-x1*y0;A+=c;cx+=(x0+x1)*c;cy+=(y0+y1)*c}
+  if(Math.abs(A)<1e-6)return ringCenter(r);return [o[0]+cx/(3*A)/KML_KX,o[1]+cy/(3*A)/KML_KY]}
 function inKml(q){let ins=false;for(let i=0,j=boundary.length-1;i<boundary.length;j=i++){const a=boundary[i],b=boundary[j];if((a[1]>q[1])!==(b[1]>q[1])&&q[0]<(b[0]-a[0])*(q[1]-a[1])/(b[1]-a[1])+a[0])ins=!ins}return ins}
-const buildingInKml=f=>{const r=f.geometry&&f.geometry.coordinates&&f.geometry.coordinates[0];return !!r&&r.length>=4&&inKml(ringCenter(r))};
+const buildingInKml=f=>{const r=f.geometry&&f.geometry.coordinates&&f.geometry.coordinates[0];if(!r||r.length<4)return false;const c=polyCentroid(r);return inKml(c)||kmlDist(c)<=OBJ3D.kmlMargin};  // 重心が区域内（境界から50m外側まで）なら含める
 const OBJ3D_SRC={
   lifts:{label:'リフト',query:()=>'[out:json][timeout:60];way["aerialway"]('+BB()+')->.l;.l out geom;node(w.l)["aerialway"~"^(pylon|station)$"];out;',convert:osmToLifts3d,set:g=>{lifts3dGeo=g},draw:drawLifts},
   buildings:{label:'建物',query:()=>'[out:json][timeout:90];(way["building"](poly:"'+KML_POLY()+'");relation["building"]["type"="multipolygon"](poly:"'+KML_POLY()+'"););out geom;',convert:osmToBuildings,set:g=>{buildingsGeo=g},draw:drawBuildings}};
@@ -1137,10 +1153,10 @@ function showObj3dInfo(){document.getElementById('obj3dInfo').textContent=['lift
 async function loadObj3d(kind,forceOsm){const S=OBJ3D_SRC[kind];let geo=null,src='';
   if(!forceOsm&&EDIT&&kind==='lifts'){const v=lsGet(OBJ3D.keys.liftsEdit);if(v&&v.features&&v.features.length){geo=v;src='端末で編集中のデータ'}}
   if(!forceOsm&&!geo){try{const r=await fetch(OBJ3D.files[kind],{cache:'no-cache'});if(r.ok){geo=await r.json();src=OBJ3D.files[kind].split('/').pop()}else obj3dLog.add('・'+S.label+'：'+OBJ3D.files[kind].split('/').pop()+' はまだ無い')}catch(e){}
-    if(!geo){const v=lsGet(OBJ3D.keys[kind]);if(v&&v.features&&v.features.length){geo=v;src='端末に保存した取得結果'}}}
-  if(!geo){obj3dLog.add('… '+S.label+'をOpenStreetMapから取得中');try{geo=S.convert(await overpassQuery(S.query(),S.label));src='OSMから取得';if(!lsSet(OBJ3D.keys[kind],geo))obj3dLog.add('・'+S.label+'：端末に保存できませんでした（容量不足）。書き出しボタンで保存してください')}
+    if(!geo){const v=lsGet(OBJ3D.keys[kind]);if(v&&v.features&&v.features.length){if(kind==='buildings'&&(v.properties||{}).kmlMargin!==OBJ3D.kmlMargin)obj3dLog.add('・建物：端末の取得結果は区域を広げる前のものなので取り直します');else{geo=v;src='端末に保存した取得結果'}}}}
+  if(!geo){obj3dLog.add('… '+S.label+'をOpenStreetMapから取得中');try{geo=S.convert(await overpassQuery(S.query(),S.label));if(kind==='buildings')geo.properties.kmlMargin=OBJ3D.kmlMargin;src='OSMから取得';if(!lsSet(OBJ3D.keys[kind],geo))obj3dLog.add('・'+S.label+'：端末に保存できませんでした（容量不足）。書き出しボタンで保存してください')}
     catch(e){obj3dLog.add('✗ '+S.label+'を取得できませんでした','ng');obj3dCount[kind]='：取得失敗';showObj3dInfo();return}}
-  if(kind==='buildings'){const before=geo.features.length;geo={...geo,features:geo.features.filter(buildingInKml)};if(before!==geo.features.length)obj3dLog.add('・建物：管理区域KMLの範囲外の'+(before-geo.features.length)+'件を除外')}  // ファイル・端末の保存から読んだ場合も範囲外は表示しない
+  if(kind==='buildings'){const before=geo.features.length;geo={...geo,features:geo.features.filter(buildingInKml)};obj3dLog.add('・建物：データ'+before+'件のうち、区域内（境界の'+OBJ3D.kmlMargin+'m外側まで）'+geo.features.length+'件を表示'+(before!==geo.features.length?'（範囲外'+(before-geo.features.length)+'件を除外）':''),geo.features.length?'':'ng')}  // ファイル・端末の保存から読んだ場合も範囲外は表示しない
   S.set(geo);const n=geo.features.length;obj3dCount[kind]=n+'件（'+src+'）';showObj3dInfo();
   const m=await S.draw();if(kind==='lifts'){const L=geo.features.filter(isLiftF),boxes=L.reduce((k,f)=>k+(f.properties.stations||[]).filter(x=>x.pos).length,0);obj3dCount[kind]=L.length+'本・支柱'+m+'本・駅舎の箱'+boxes+'（'+src+'）'}showObj3dInfo();obj3dLog.add('✓ '+S.label+'：'+n+'件を表示','ok')}
 function downloadGeo(geo,name){if(!geo){alert('まだデータがありません');return}saveAsFile(geo,name)}
