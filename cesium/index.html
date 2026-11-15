@@ -747,12 +747,18 @@ const editor=EDIT?(function(){
   function cancelInteraction(){clearTimeout(lp);lp=null;if(raf){cancelAnimationFrame(raf);raf=0}
     if(pv){if(pv.raf)cancelAnimationFrame(pv.raf);for(const e of pv.ents)mk.entities.remove(e);pv=null}
     drag=null;moveDrag=null;down=null;ptrs.clear();mk.entities.removeAll()}
-  function disposeFeature(ft){if(!ft)return;if(pv&&pv.ft===ft||editSel===ft)cancelInteraction();vHeights.delete(ft);removeCourseFeature(ft);
+  function disposeFeature(ft){if(!ft)return;if(pv&&pv.ft===ft||editSel===ft)cancelInteraction();removeCourseFeature(ft);
     if(editSel===ft){editSel=null;vSel=[];merging=false;hideMenu()}}
   // 選択中のコースがデータから消えていたら選択を外す（古い参照を描かない）
   const selAlive=()=>{if(editSel&&(!courseGeo.features.includes(editSel)||!editSel.geometry||!editSel.properties)){editSel=null;vSel=[];merging=false;hideMenu()}return !!editSel};
   // --- 位置の取得・当たり判定（指の下の地面からの距離で判定。地形の標高取得に頼らない）---
-  function pickAt(x,y){const ray=camera.getPickRay(new Cesium.Cartesian2(x,y)),p=ray&&globe.pick(ray,scene);if(!p)return null;const c=Cesium.Cartographic.fromCartesian(p);
+  // 指の位置の地面：画面座標から pickPosition（描画した地形の深度）で交点を取り、その座標をそのまま使う。
+  // リフトのワイヤー・駅舎などに当たった（地面より5m以上高い）ときと、取れないときだけ地形との交差計算(globe.pick)にする。
+  function groundPos(x,y){const w=new Cesium.Cartesian2(x,y),ray=camera.getPickRay(w),g=ray&&globe.pick(ray,scene);let p;
+    if(scene.pickPositionSupported){try{p=scene.pickPosition(w)}catch(e){p=undefined}}
+    if(p&&g){const hp=Cesium.Cartographic.fromCartesian(p),hg=Cesium.Cartographic.fromCartesian(g);if(!hp||!isFinite(hp.height)||hp.height-hg.height>5)p=undefined}
+    return p||g||null}
+  function pickAt(x,y){const p=groundPos(x,y);if(!p)return null;const c=Cesium.Cartographic.fromCartesian(p);
     return {ll:[+Cesium.Math.toDegrees(c.longitude).toFixed(7),+Cesium.Math.toDegrees(c.latitude).toFixed(7)],mpp:Cesium.Cartesian3.distance(camera.position,p)*2*Math.tan(camera.frustum.fovy/2)/scene.canvas.clientHeight}}
   const pickLL=(x,y)=>{const h=pickAt(x,y);return h&&h.ll};
   const toM=(q,o)=>[(q[0]-o[0])*Math.cos(o[1]*Math.PI/180)*111320,(q[1]-o[1])*110540];
@@ -766,7 +772,8 @@ const editor=EDIT?(function(){
   const insideSel=(x,y)=>{if(!editSel)return false;const ll=pickLL(x,y);return !!ll&&inRing(ll,courseRing(editSel))};
   window.__editHit=(x,y)=>!creating&&!merging&&!!editSel&&(nearestVertex(x,y,24)>=0||insideSel(x,y));  // 頂点・選択中コースの内側をつかんだときは地図を動かさない
   // --- 表示 ---
-  const pt=(q,size,color,outline)=>({position:Cesium.Cartesian3.fromDegrees(q[0],q[1]),point:{pixelSize:size,color,outlineColor:outline||Cesium.Color.WHITE,outlineWidth:2,heightReference:Cesium.HeightReference.CLAMP_TO_GROUND,disableDepthTestDistance:Number.POSITIVE_INFINITY}});
+  const pt=(q,size,color,outline)=>({position:Cesium.Cartesian3.fromDegrees(q[0],q[1]),point:{pixelSize:size,color:color.alpha>=1?color.withAlpha(0.99):color,  // 半透明扱いにして pickPosition が目印ではなく地面を取るようにする
+    outlineColor:outline||Cesium.Color.WHITE,outlineWidth:2,heightReference:Cesium.HeightReference.CLAMP_TO_GROUND,disableDepthTestDistance:Number.POSITIVE_INFINITY}});
   function markers(){selAlive();mk.entities.suspendEvents();mk.entities.removeAll();
     if(editSel){const r=courseRing(editSel);
       r.slice(0,-1).forEach((q,i)=>mk.entities.add(pt([(q[0]+r[i+1][0])/2,(q[1]+r[i+1][1])/2],8,ORANGE.withAlpha(0.7))));  // 辺の目印
@@ -785,32 +792,32 @@ const editor=EDIT?(function(){
       merging?'結合：隣のコースをタップしてください（取り消すにはもう一度「結合」）':
       editSel?'選択中：'+(editSel.properties.name||'名前なし')+'（頂点'+verts().length+(vSel.length?'・選択頂点'+vSel.length:'')+'）　内側をドラッグ＝コースごと移動／頂点ドラッグ＝頂点移動／辺タップ＝追加／長押し＝削除／頂点タップ＝選ぶ':
       'コースをタップして選択。頂点以外のドラッグは地図の移動');msg=''}
-  function select(ft){const old=editSel;editSel=ft;vSel=[];merging=false;if(!ft)hideMenu();if(ft&&ft!==old)prepareHeights(ft);if(old)redrawFeature(old);if(ft)redrawFeature(ft);markers();info()}
+  function select(ft){const old=editSel;editSel=ft;vSel=[];merging=false;if(!ft)hideMenu();if(old)redrawFeature(old);if(ft)redrawFeature(ft);markers();info()}
   function live(){if(!raf)raf=requestAnimationFrame(()=>{raf=0;redrawFeature(editSel);markers()})}
-  // --- ドラッグ中の軽いプレビュー ---
-  // ドラッグ中は編集中コースの地形貼り付け（面・縁）を隠し、地形に貼らない枠線だけを動かす。他のコースには触らない。
-  // 指の動きは記録だけして、地面の位置の計算と頂点の更新は1フレームに1回まとめて行う。離したときだけ地形に貼り直す。
-  const vHeights=new WeakMap();  // コースごとの頂点の地表標高（選択時に求めておく）
-  function prepareHeights(ft){if(!ft)return;const r=courseRing(ft);Promise.all(r.map(q=>sampleGround(q[0],q[1]))).then(h=>{if(courseRing(ft)===r&&h.length===r.length)vHeights.set(ft,h)}).catch(()=>{})}
+  // --- ドラッグ中のプレビュー ---
+  // ドラッグ中も、確定後と同じ方法で地表に貼る：面＝地形への貼り付け(classificationType TERRAIN)、縁＝clampToGround、頂点の目印＝heightReference CLAMP_TO_GROUND。
+  // 形は編集中のコースだけを作り直し、他のコースには触らない。指の動きは記録だけして、頂点の更新は1フレームに1回まとめて行う。
   let pv=null;
-  function startPreview(){const ft=editSel,r=courseRing(ft);let hs=vHeights.get(ft);
-    if(!hs||hs.length!==r.length){hs=r.map(q=>globe.getHeight(Cesium.Cartographic.fromDegrees(q[0],q[1])));const known=hs.filter(h=>h!==undefined),avg=known.length?known.reduce((a,b)=>a+b,0)/known.length:(lastGround||0);hs=hs.map(h=>h===undefined?avg:h)}
-    hs=hs.slice();const pos=r.map((q,k)=>Cesium.Cartesian3.fromDegrees(q[0],q[1],hs[k]+1.5));
-    removeCourseFeature(ft);mk.entities.removeAll();  // 地形に貼ったものは一時的に外す（showの切替は作成途中の形と重なるとCesiumが描画エラーになるため使わない）。離したときに作り直す
-    const ents=[mk.entities.add({polyline:{positions:new Cesium.CallbackProperty(()=>pv?pv.pos:pos,false),width:3,material:ORANGE,depthFailMaterial:new Cesium.ColorMaterialProperty(ORANGE.withAlpha(0.5)),arcType:Cesium.ArcType.NONE}})];
-    if(drag)ents.push(mk.entities.add({position:new Cesium.CallbackProperty(()=>pv?pv.pos[drag?drag.i:0]:pos[0],false),point:{pixelSize:20,color:Cesium.Color.WHITE,outlineColor:ORANGE,outlineWidth:2,disableDepthTestDistance:Number.POSITIVE_INFINITY}}));
-    pv={ft,hs,pos,ents,orig:moveDrag?moveDrag.orig[0]:null,xy:null,raf:0};scene.requestRender()}
+  const SEL_FILL=Cesium.Color.fromCssColorString('#ff9800').withAlpha(0.5),degArr=r=>Cesium.Cartesian3.fromDegreesArray(r.flat());
+  function startPreview(){const ft=editSel;removeCourseFeature(ft);mk.entities.removeAll();  // 確定済みの形は一時的に外し（showの切替は描画エラーの原因になるため使わない）、下のプレビューに置き換える
+    let cache={v:-1};const shape=()=>{if(!pv)return cache;if(cache.v!==pv.ver){const rs=ft.geometry.coordinates;cache={v:pv.ver,h:new Cesium.PolygonHierarchy(degArr(rs[0]),rs.slice(1).map(h=>new Cesium.PolygonHierarchy(degArr(h)))),lines:rs.map(degArr)}}return cache};
+    const ents=[];pv={ft,ents,ver:0,xy:null,raf:0};
+    ents.push(mk.entities.add({polygon:{hierarchy:new Cesium.CallbackProperty(()=>shape().h,false),material:SEL_FILL,classificationType:Cesium.ClassificationType.TERRAIN}}));
+    ft.geometry.coordinates.forEach((_,i)=>ents.push(mk.entities.add({polyline:{positions:new Cesium.CallbackProperty(()=>shape().lines[i],false),width:3.5,material:ORANGE,clampToGround:true}})));
+    const r=courseRing(ft);
+    r.slice(0,-1).forEach((q,k)=>{const moving=!!moveDrag||(drag&&drag.i===k),o=pt(q,drag&&drag.i===k?20:16,Cesium.Color.WHITE,ORANGE);
+      if(moving)o.position=new Cesium.CallbackProperty(()=>{const c=courseRing(ft)[k];return Cesium.Cartesian3.fromDegrees(c[0],c[1])},false);  // 動く頂点だけ毎フレーム位置を読む
+      ents.push(mk.entities.add(o))});
+    scene.requestRender()}
   function queueMove(x,y){if(!pv)return;pv.xy=[x,y];if(!pv.raf)pv.raf=requestAnimationFrame(applyMove)}
   function applyMove(){if(!pv)return;pv.raf=0;if(!pv.xy)return;const [x,y]=pv.xy;pv.xy=null;
-    const ray=camera.getPickRay(new Cesium.Cartesian2(x,y)),P=ray&&globe.pick(ray,scene);if(!P)return;
-    const c=Cesium.Cartographic.fromCartesian(P),ll=[+Cesium.Math.toDegrees(c.longitude).toFixed(7),+Cesium.Math.toDegrees(c.latitude).toFixed(7)],up=Cesium.Cartesian3.fromRadians(c.longitude,c.latitude,c.height+1.5);
-    if(drag){setV(drag.i,ll);pv.pos[drag.i]=up;pv.hs[drag.i]=c.height;if(drag.i===0){pv.pos[pv.pos.length-1]=up;pv.hs[pv.hs.length-1]=c.height}}
+    const P=groundPos(x,y);if(!P)return;const c=Cesium.Cartographic.fromCartesian(P),ll=[+Cesium.Math.toDegrees(c.longitude).toFixed(7),+Cesium.Math.toDegrees(c.latitude).toFixed(7)];  // 指の下の地面の座標をそのまま使う
+    if(drag)setV(drag.i,ll);
     else if(moveDrag){const dx=ll[0]-moveDrag.start[0],dy=ll[1]-moveDrag.start[1];
-      editSel.geometry.coordinates=moveDrag.orig.map(r=>r.map(q=>[+(q[0]+dx).toFixed(7),+(q[1]+dy).toFixed(7)]));
-      pv.pos=pv.orig.map((q,k)=>Cesium.Cartesian3.fromDegrees(q[0]+dx,q[1]+dy,pv.hs[k]+1.5))}
-    scene.requestRender()}
+      editSel.geometry.coordinates=moveDrag.orig.map(r=>r.map(q=>[+(q[0]+dx).toFixed(7),+(q[1]+dy).toFixed(7)]))}
+    pv.ver++;scene.requestRender()}
   function endPreview(){if(!pv)return;if(pv.raf){cancelAnimationFrame(pv.raf);pv.raf=0}if(pv.xy)applyMove();  // 最後の位置を反映
-    const ft=pv.ft;for(const e of pv.ents)mk.entities.remove(e);pv=null;redrawFeature(ft);markers();prepareHeights(ft)}  // ここで初めて地形に貼り直す
+    const ft=pv.ft;for(const e of pv.ents)mk.entities.remove(e);pv=null;redrawFeature(ft);markers()}  // 確定済みの形に戻す
   // --- 頂点の操作 ---
   function setV(i,ll){const r=courseRing(editSel);r[i]=ll;if(i===0)r[r.length-1]=ll.slice()}
   function delV(i){const r=courseRing(editSel);if(r.length-1<=3){alert('コースの頂点は3点より少なくできません');return}pushUndo();r.splice(i,1);if(i===0)r[r.length-1]=r[0].slice();vSel=[];changed(editSel)}
