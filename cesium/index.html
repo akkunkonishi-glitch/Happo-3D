@@ -549,16 +549,42 @@ function drawCourses(){
 const courseCounts=()=>{const f=courseGeo.features;return 'コース'+f.filter(isCourse).length+'・リフト'+f.filter(x=>x.properties.kind==='lift').length};
 const lsGet=k=>{try{const v=localStorage.getItem(k);return v?JSON.parse(v):null}catch(e){return null}};
 const lsSet=(k,v)=>{try{localStorage.setItem(k,JSON.stringify(v));return true}catch(e){return false}};
-// コースの編集データは、形の正しいものだけを書き、前回分を .bak に残してから上書きし、書けたか読み戻して確かめる（失敗したら前回分に戻す）
-function cleanCourseGeo(geo){const ok=q=>Array.isArray(q)&&isFinite(q[0])&&isFinite(q[1]);
-  const feats=((geo&&geo.features)||[]).filter(f=>f&&f.properties&&f.properties.id!=null&&f.geometry&&Array.isArray(f.geometry.coordinates)&&(
-    f.geometry.type==='Polygon'?f.geometry.coordinates.length&&f.geometry.coordinates.every(r=>Array.isArray(r)&&r.length>=4&&r.every(ok)):
-    f.geometry.type==='LineString'?f.geometry.coordinates.length>=2&&f.geometry.coordinates.every(ok):false));
+// ===== コース編集データの保存（検証・世代バックアップ・形式の変換）=====
+// 本体：happoCoursesEdit（JSON、形式 v2 = properties.happoFormat:2）。保存のたびに直前の本体を .gen1 へ、.gen1→.gen2→.gen3 と送り、直前3世代を残す。
+// 世代は gzip圧縮＋Base64（先頭 "gz:"）。容量不足のときは古い世代から消して本体を守る。
+const COURSE_FORMAT=2,GEN_N=3,GEN_SCAN=5,genKey=(key,i)=>key+'.gen'+i;  // GEN_SCAN：以前の5世代方式で残った .gen4/.gen5 も読む
+const validCoord=q=>Array.isArray(q)&&q.length>=2&&isFinite(q[0])&&isFinite(q[1])&&q[0]>120&&q[0]<155&&q[1]>20&&q[1]<50;  // 日本付近の経度・緯度
+function featureProblem(f){if(!f||f.type!=='Feature'||!f.properties||!f.geometry)return '地物の形式が違う';if(f.properties.id==null||f.properties.id==='')return 'idが無い';
+  const g=f.geometry,c=g.coordinates;if(!Array.isArray(c))return '座標が無い';
+  if(g.type==='Polygon'){if(!c.length)return '輪郭が無い';for(const r of c){if(!Array.isArray(r)||r.length<4)return '頂点が足りない';if(!r.every(validCoord))return '座標が不正';const A=r[0],B=r[r.length-1];if(A[0]!==B[0]||A[1]!==B[1])return '輪郭が閉じていない'}return null}
+  if(g.type==='LineString')return c.length>=2&&c.every(validCoord)?null:'線の座標が不正';
+  return '未対応の形（'+g.type+'）'}
+function cleanCourseGeo(geo){  // 正しい地物だけを残した写し（読み込み・救出用）
+  const feats=((geo&&geo.features)||[]).filter(f=>!featureProblem(f));
   return JSON.parse(JSON.stringify({type:'FeatureCollection',properties:(geo&&geo.properties)||{},features:feats},(k,v)=>k.startsWith('__')?undefined:v))}
-// --- 編集データの保存と世代バックアップ ---
-// 本体：happoCoursesEdit（JSONのまま）。編集で上書きするたびに、直前の本体を happoCoursesEdit.gen1 に入れ、gen1→gen2…と送って直近5世代を残す。
-// 世代は gzip圧縮＋Base64（先頭 "gz:"）で保存して容量を節約する。容量が足りないときは古い世代から消して本体を守る。
-const GEN_N=5,genKey=(key,i)=>key+'.gen'+i;
+// 保存前の検証：1件でも壊れた地物・idの重複・コース0件があれば保存しない
+function validateCourseGeo(geo){if(!geo||geo.type!=='FeatureCollection'||!Array.isArray(geo.features))return {ok:false,why:'データの形式が違う'};
+  const ids=new Set();let courses=0;
+  for(const f of geo.features){const pr=featureProblem(f);if(pr)return {ok:false,why:'壊れたデータがある（'+(f&&f.properties&&f.properties.name||f&&f.properties&&f.properties.id||'名前なし')+'：'+pr+'）'};
+    const id=String(f.properties.id);if(ids.has(id))return {ok:false,why:'idが重複している（'+id+'）'};ids.add(id);if(f.properties.kind==='course')courses++}
+  if(!courses)return {ok:false,why:'コースが0件'};
+  let g;try{g=JSON.parse(JSON.stringify(geo,(k,v)=>k.startsWith('__')?undefined:v))}catch(e){return {ok:false,why:'JSONにできない'}}
+  if(g.features.length!==geo.features.length)return {ok:false,why:'書き出すと件数が変わる'};
+  g.properties=Object.assign({},g.properties,{happoFormat:COURSE_FORMAT});return {ok:true,geo:g,courses}}
+const courseCount=g=>g&&g.features?g.features.filter(f=>f&&f.properties&&f.properties.kind==='course').length:0;
+// 形式の変換：どの版の保存データでも v2 にそろえる。新しい形式を追加するときはここに「旧→新」の変換を足す
+//  v1：形式番号なしの FeatureCollection（旧 kind=piste-area/piste-line、MultiPolygon、idなしも含む）
+//  配列だけ・{geo:…}/{data:…} に包まれたものも受け付ける
+function migrateCourseData(obj){let from=0;
+  if(Array.isArray(obj))obj={type:'FeatureCollection',properties:{},features:obj};
+  else if(obj&&!obj.features&&(obj.geo||obj.data)&&(obj.geo||obj.data).features)obj=obj.geo||obj.data;
+  if(!obj||!Array.isArray(obj.features))throw new Error('コースデータではない');
+  from=(obj.properties&&obj.properties.happoFormat)||1;
+  if(from>COURSE_FORMAT)throw new Error('新しい形式（v'+from+'）のため、このページでは読めません');
+  let g=obj;
+  if(from<2)g=HappoCourses.normalizeCourses(obj,{width:COURSE.width});  // v1→v2：コース=Polygon・リフト=LineString・idを付与
+  g.properties=Object.assign({},g.properties,{happoFormat:COURSE_FORMAT});
+  return {geo:g,from}}
 const b64=u8=>{let s='';for(let i=0;i<u8.length;i+=0x8000)s+=String.fromCharCode.apply(null,u8.subarray(i,i+0x8000));return btoa(s)};
 async function packText(txt){if(typeof CompressionStream==='undefined')return txt;
   const buf=await new Response(new Blob([txt]).stream().pipeThrough(new CompressionStream('gzip'))).arrayBuffer();return 'gz:'+b64(new Uint8Array(buf))}
@@ -572,29 +598,54 @@ function salvageFeatures(txt){const out=[],re=/\{\s*"type"\s*:\s*"Feature"\s*,/g
       if(c==='"')inS=true;else if(c==='{')d++;else if(c==='}'){d--;if(!d){end=i;break}}}
     if(end<0)continue;try{out.push(JSON.parse(txt.slice(m.index,end+1)));re.lastIndex=end+1}catch(e){}}
   return out}
-// 保存キーを読む：正常ならそのまま、壊れていれば読める Feature だけ救出。{geo,status:'ok'|'salvaged'|'broken'|'none',bytes}
+// 保存キーを読む：形式を変換し、壊れていれば読める地物だけ救出。{geo,status:'ok'|'salvaged'|'broken'|'none',bytes,from}
 async function readCourseKey(key){let raw=null;try{raw=localStorage.getItem(key)}catch(e){}
-  if(raw==null)return {status:'none',bytes:0};const bytes=raw.length;let txt;
+  if(raw==null)return {status:'none',bytes:0};return readCourseText(raw,raw.length)}
+async function readCourseText(raw,bytes){let txt;
   try{txt=await unpackText(raw)}catch(e){return {status:'broken',bytes,why:'圧縮データを展開できない'}}
-  try{const g=JSON.parse(txt);if(g&&Array.isArray(g.features))return {status:'ok',bytes,geo:cleanCourseGeo(g),edited:g.properties&&g.properties.edited}}catch(e){}
-  const feats=salvageFeatures(txt||''),g=cleanCourseGeo({type:'FeatureCollection',properties:{salvaged:new Date().toISOString()},features:feats}),em=/"edited"\s*:\s*"([^"]+)"/.exec(txt||'');
-  return g.features.length?{status:'salvaged',bytes,geo:g,edited:em&&em[1]}:{status:'broken',bytes,why:'読める地物が無い'}}
+  let parsed=null;try{parsed=JSON.parse(txt)}catch(e){}
+  if(parsed){try{const m=migrateCourseData(parsed),g=cleanCourseGeo(m.geo);if(courseCount(g))return {status:g.features.length===m.geo.features.length?'ok':'salvaged',bytes,geo:g,from:m.from,edited:m.geo.properties&&m.geo.properties.edited}
+      return {status:'broken',bytes,why:'コースが0件'}}catch(e){return {status:'broken',bytes,why:e.message}}}
+  const feats=salvageFeatures(txt||'');let g;try{g=cleanCourseGeo(migrateCourseData(feats).geo)}catch(e){g={features:[]}}const em=/"edited"\s*:\s*"([^"]+)"/.exec(txt||'');
+  return courseCount(g)?{status:'salvaged',bytes,geo:g,from:1,edited:em&&em[1]}:{status:'broken',bytes,why:'読める地物が無い'}}
 const isQuota=e=>e&&(e.name==='QuotaExceededError'||e.code===22||e.code===1014);
-function setWithRoom(k,v,key){for(let drop=GEN_N;;drop--){try{localStorage.setItem(k,v);return true}catch(e){
-  if(!isQuota(e)||drop<1)return false;try{localStorage.removeItem(genKey(key,drop))}catch(_){}}}}  // 容量不足なら古い世代から消して再挑戦
+function setWithRoom(k,v,key){for(let drop=GEN_SCAN;;drop--){try{localStorage.setItem(k,v);return true}catch(e){
+  if(!isQuota(e)||drop<1)return false;const dk=genKey(key,drop);if(dk!==k)try{localStorage.removeItem(dk)}catch(_){}}}}  // 容量不足なら古い世代から消して再挑戦
 let saveChain=Promise.resolve();
-function saveCoursesSafe(key,geo){let g;try{g=cleanCourseGeo(geo)}catch(e){return Promise.resolve(false)}  // 呼んだ時点の内容を写し取ってから順番に保存
-  const job=saveChain.then(()=>saveCoursesNow(key,g)).catch(()=>false);saveChain=job;return job}
-async function saveCoursesNow(key,g){
-  if(!g.features.filter(f=>f.properties.kind==='course').length)return false;  // コース0件では上書きしない（前の保存を守る）
+let courseBase={fromEdit:false,hold:false};  // 今の表示が端末の編集データから始まったか（違うときは上書き前に確認する）
+// 保存：呼んだ時点の内容を検証して写し取り、順番に保存する。結果 {ok, why, ask?:確認が必要な理由}
+function saveCoursesSafe(key,geo,opt){opt=opt||{};const v=validateCourseGeo(geo);if(!v.ok)return Promise.resolve({ok:false,why:v.why});
+  const job=saveChain.then(()=>saveCoursesNow(key,v.geo,v.courses,opt)).catch(e=>({ok:false,why:String(e&&e.message||e)}));saveChain=job;return job}
+async function saveCoursesNow(key,g,n,opt){
   const txt=JSON.stringify(g);let prev=null;try{prev=localStorage.getItem(key)}catch(e){}
-  if(prev===txt)return true;
-  if(prev){try{const packed=await packText(prev);  // 直前の本体を世代1へ。古い世代を1つずつ送る
+  if(prev===txt)return {ok:true};
+  if(prev&&!opt.force){const pr=await readCourseText(prev,prev.length),pn=pr.geo?courseCount(pr.geo):0;
+    if(pn&&!courseBase.fromEdit)return {ok:false,ask:'端末には別の編集データ（コース'+pn+'件）が保存されています。今の表示（コース'+n+'件）で上書きしますか？\n上書き前の版はバックアップに残ります'};
+    if(pn>=6&&n<=pn/2)return {ok:false,ask:'コースが'+pn+'件から'+n+'件に大きく減ります。このまま保存しますか？\n保存前の版はバックアップに残ります'}}
+  if(prev){try{const packed=await packText(prev);  // 直前の本体を世代1へ。古い世代を1つずつ送る（直前3世代）
       for(let i=GEN_N;i>1;i--){const v=localStorage.getItem(genKey(key,i-1));if(v!=null)setWithRoom(genKey(key,i),v,key);else localStorage.removeItem(genKey(key,i))}
-      setWithRoom(genKey(key,1),packed,key);try{localStorage.removeItem(key+'.bak')}catch(e){}}catch(e){}}  // 旧方式の .bak は世代に移ったので消して容量を空ける
-  if(!setWithRoom(key,txt,key))return false;
-  try{if(localStorage.getItem(key)!==txt){if(prev)localStorage.setItem(key,prev);return false}}catch(e){return false}
-  return true}
+      if(!setWithRoom(genKey(key,1),packed,key))return {ok:false,why:'バックアップを保存できない（容量不足）'};
+      try{localStorage.removeItem(key+'.bak')}catch(e){}}catch(e){return {ok:false,why:'バックアップを作れない（'+(e&&e.message||e)+'）'}}}  // バックアップを残せないときは本体も上書きしない
+  if(!setWithRoom(key,txt,key))return {ok:false,why:'容量不足で保存できない'};
+  try{if(localStorage.getItem(key)!==txt){if(prev)localStorage.setItem(key,prev);return {ok:false,why:'書き込みを確認できない'}}}catch(e){return {ok:false,why:'書き込みを確認できない'}}
+  courseBase.fromEdit=true;return {ok:true}}
+// 前の版に戻す：[本体,1,2,3世代前] → [1,2,3世代前,本体] と回す（何も消えない。押すたびにさらに前へ、一周すると元に戻る）
+function stepBackCourses(key){const job=saveChain.then(async()=>{
+    const r1=await readCourseKey(genKey(key,1));if(!r1.geo)return {ok:false,why:'戻せる前の版がありません'};
+    const v=validateCourseGeo(r1.geo);if(!v.ok)return {ok:false,why:'前の版が壊れています（'+v.why+'）'};
+    const raw=[key,genKey(key,1),genKey(key,2),genKey(key,3)].map(k=>{try{return localStorage.getItem(k)}catch(e){return null}});
+    const packedMain=raw[0]?await packText(raw[0]):null,txt=JSON.stringify(v.geo);
+    const order=[[key,txt],[genKey(key,1),raw[2]],[genKey(key,2),raw[3]],[genKey(key,3),packedMain]];
+    try{for(const [k,val] of order){if(val==null)localStorage.removeItem(k);else if(!setWithRoom(k,val,key))throw new Error('容量不足')}}
+    catch(e){try{[key,genKey(key,1),genKey(key,2),genKey(key,3)].forEach((k,i)=>{if(raw[i]==null)localStorage.removeItem(k);else localStorage.setItem(k,raw[i])})}catch(_){}return {ok:false,why:'書き込めませんでした（'+e.message+'）'}}
+    courseBase.fromEdit=true;return {ok:true,geo:v.geo,edited:r1.edited,n:v.courses}});
+  saveChain=job.catch(()=>{});return job}
+// ファイルとして保存：共有シート（「ファイルに保存」でiPadのファイルAppへ）。使えないときはダウンロード
+function saveAsFile(obj,name){const txt=JSON.stringify(obj),file=new File([txt],name,{type:'application/json'});
+  try{if(navigator.canShare&&navigator.share&&navigator.canShare({files:[file]}))return navigator.share({files:[file],title:name}).then(()=>'shared',e=>e&&e.name==='AbortError'?'cancel':dl())}catch(e){}
+  return Promise.resolve(dl());
+  function dl(){const a=document.createElement('a');a.href=URL.createObjectURL(file);a.download=name;document.body.appendChild(a);a.click();setTimeout(()=>{URL.revokeObjectURL(a.href);a.remove()},5000);return 'download'}}
+const stampName=(base,ext)=>{const d=new Date(),p=n=>String(n).padStart(2,'0');return base+'-'+d.getFullYear()+p(d.getMonth()+1)+p(d.getDate())+'-'+p(d.getHours())+p(d.getMinutes())+ext};
 // 取得状況を画面に1行ずつ表示（成功=緑、失敗=赤）
 const courseLog={lines:[],add(text,cls){this.lines.push({text,cls});this.render()},clear(){this.lines=[];this.render()},
   render(){const el=document.getElementById('courseStatus');el.textContent='';for(const l of this.lines){const d=document.createElement('div');d.textContent=l.text;if(l.cls)d.className=l.cls;el.appendChild(d)}el.scrollTop=el.scrollHeight}};
@@ -626,12 +677,17 @@ async function loadCourses(){
     if(!n){courseLog.add('・'+label+'：コース0件のため使わない');return false}
     courseGeo=g;drawCourses();info.textContent=courseCounts()+'（'+src+'）';courseLog.add('✓ '+label+'：コース'+n+'件を表示','ok');return true};
   if(EDIT){const cands=[[COURSE.keys.edit,'端末の編集中データ'],...[1,2,3,4,5].map(i=>[genKey(COURSE.keys.edit,i),'編集データのバックアップ'+i+'世代前']),[COURSE.keys.edit+'.bak','編集データの旧バックアップ']];
+    courseBase.fromEdit=false;
     for(const [k,label] of cands){const r=await readCourseKey(k);if(r.status==='none'){if(k===COURSE.keys.edit)courseLog.add('・'+label+'：なし');continue}
       if(r.status==='broken'){courseLog.add('✗ '+label+'：壊れていて読めない（'+r.why+'）','ng');continue}
       const src=k===COURSE.keys.edit?'端末で編集中のデータ':label+'から復元';
       if(r.status==='salvaged')courseLog.add('⚠ '+label+'：一部が壊れていたため、読める'+r.geo.features.length+'件だけ復元','ng');
-      if(tryUse(r.geo,label,src+(r.status==='salvaged'?'・一部復元':''))){if(k!==COURSE.keys.edit||r.status==='salvaged')courseLog.add('・「保存データを確認・復旧」で他の世代も選べます');return}}
-    if(tryUse(lsGet(COURSE.keys.oldEdit),'旧バージョンの編集データ','旧バージョンの編集を引き継ぎ'))return}
+      if(tryUse(r.geo,label,src+(r.status==='salvaged'?'・一部復元':''))){courseBase.fromEdit=true;
+        if(r.from<COURSE_FORMAT){courseLog.add('・'+label+'：旧形式(v'+r.from+')を新形式(v'+COURSE_FORMAT+')に変換しました（元の形式の版はバックアップに残します）','ok');
+          saveCoursesSafe(COURSE.keys.edit,courseGeo,{force:true}).then(x=>courseLog.add(x.ok?'✓ 新形式で保存しました':'✗ 新形式で保存できませんでした（'+(x.why||'')+'）',x.ok?'ok':'ng'))}
+        if(k!==COURSE.keys.edit||r.status==='salvaged')courseLog.add('・「保存データを確認・復旧」で他の版も選べます');return}}
+    const old=await readCourseKey(COURSE.keys.oldEdit);
+    if(old.geo&&tryUse(old.geo,'旧バージョンの編集データ','旧バージョンの編集を引き継ぎ・新形式に変換')){courseBase.fromEdit=true;return}}
   try{const r=await fetch(COURSE.file,{cache:'no-cache'});
     if(r.ok){let g=null;try{g=await r.json()}catch(e){courseLog.add('✗ courses.geojson：JSONとして読めない','ng')}if(g&&tryUse(g,'courses.geojson','courses.geojson'))return}
     else courseLog.add('・courses.geojson：まだ無い（HTTP '+r.status+'）')}
@@ -668,16 +724,23 @@ const editor=EDIT?(function(){
     '<div><button id="eDup">複製</button><button id="eDelete">このコースを削除</button></div><div><button id="eSplit">分割</button><button id="eMerge">結合</button></div>'+
     '<div><button id="eUndo">元に戻す</button><button id="eDeselect">選択解除</button></div>'+
     '<div><button id="eExport">GeoJSONを書き出す</button><button id="eDiscard">編集を破棄</button><button id="eOsm">OSMから作成</button></div>'+
-    '<div><button id="eRecover">保存データを確認・復旧</button></div>';
+    '<div><button id="ePrev">前の版に戻す</button><button id="eRecover">保存データを確認・復旧</button></div>'+
+    '<div><button id="eFile">ファイルとして保存</button><button id="eLoadFile">ファイルから読み込む</button><input type="file" id="eFileIn" accept=".geojson,.json,application/json,application/geo+json" style="display:none"></div>';
   document.getElementById('courseRow').after(row);
   const $=id=>document.getElementById(id),infoEl=row.querySelector('.ei');
   const mk=new Cesium.CustomDataSource('editMarkers');viewer.dataSources.add(mk);
   let creating=null,merging=false,vSel=[],drag=null,down=null,lp=null,saveT=null,raf=0,msg='';const ptrs=new Set(),undoStack=[];
   const ORANGE=Cesium.Color.fromCssColorString('#ff6d00'),BLUE=Cesium.Color.fromCssColorString('#2979ff');
   // --- 保存・取り消し ---
-  function save(){clearTimeout(saveT);saveT=setTimeout(()=>{courseGeo.properties=courseGeo.properties||{};courseGeo.properties.edited=new Date().toISOString();
+  function save(){clearTimeout(saveT);saveT=setTimeout(()=>{saveT=null;courseGeo.properties=courseGeo.properties||{};courseGeo.properties.edited=new Date().toISOString();
     if(renderTrouble){save();return}  // 描画エラーから立ち直るまでは保存を待つ
-    saveCoursesSafe(COURSE.keys.edit,courseGeo).then(ok=>{document.getElementById('courseInfo').textContent=courseCounts()+(ok?'（端末で編集中のデータ・自動保存済み／直近'+GEN_N+'世代をバックアップ）':'（⚠ 端末に保存できませんでした。前回の保存はそのまま残っています）')})},300)}
+    if(courseBase.hold){showSave({ok:false,why:'上書きを止めています（端末の別データを守るため）'});return}
+    saveCoursesSafe(COURSE.keys.edit,courseGeo).then(r=>{
+      if(r.ask){if(confirm(r.ask))saveCoursesSafe(COURSE.keys.edit,courseGeo,{force:true}).then(showSave);
+        else{courseBase.hold=true;showSave({ok:false,why:'上書きを止めています。端末のデータは「保存データを確認・復旧」から読み込めます'})}return}
+      showSave(r)})},300)}
+  function showSave(r){document.getElementById('courseInfo').textContent=courseCounts()+(r.ok?'（端末で編集中のデータ・自動保存済み／前の'+GEN_N+'版をバックアップ）':'（⚠ 保存していません：'+r.why+'。前回の保存はそのまま残っています）');
+    if(!r.ok)courseLog.add('⚠ 保存していません：'+r.why,'ng')}
   function pushUndo(){undoStack.push({geo:JSON.stringify(courseGeo),sel:editSel&&editSel.properties.id});if(undoStack.length>40)undoStack.shift()}
   function changed(...fts){for(const f of fts)redrawFeature(f);save();markers();info()}
   // ドラッグ中のプレビュー・指の状態・長押しタイマー・頂点マーカーをすべて片付ける（削除・結合・分割・元に戻す・描画エラーのとき）
@@ -840,7 +903,7 @@ const editor=EDIT?(function(){
     try{const g=await fetchOsmCourses();pushUndo();cancelInteraction();courseGeo=g;editSel=null;vSel=[];hideMenu();drawCourses();save();markers();info()}catch(e){alert('取得できませんでした：'+(e&&e.message||e));info()}};
   // --- 保存データの確認・復旧：端末に残っているコースデータを一覧し、選んで復元（壊れていても読める部分だけ復元）---
   const rec=document.createElement('div');rec.id='recoverBox';document.body.appendChild(rec);
-  async function openRecover(){const K=COURSE.keys,list=[[K.edit,'編集中データ（本体）'],...[1,2,3,4,5].map(i=>[genKey(K.edit,i),'バックアップ '+i+'世代前']),[K.edit+'.bak','旧バックアップ(.bak)'],[K.oldEdit,'旧バージョンの編集データ'],[K.auto,'OSMから自動生成した一時データ'],[K.oldOsm,'旧バージョンのOSMデータ']];
+  async function openRecover(){const K=COURSE.keys,list=[[K.edit,'編集中データ（本体）'],...[1,2,3,4,5].map(i=>[genKey(K.edit,i),'バックアップ '+i+'つ前の版'+(i>GEN_N?'（以前の方式で残ったもの）':'')]),[K.edit+'.bak','旧バックアップ(.bak)'],[K.oldEdit,'旧バージョンの編集データ'],[K.auto,'OSMから自動生成した一時データ'],[K.oldOsm,'旧バージョンのOSMデータ']];
     rec.innerHTML='<div class="rt">端末の保存データ</div><div class="rn">いま表示中：'+courseCounts()+'</div><div class="rl">確認中…</div><button data-a="close">閉じる</button>';rec.style.display='block';
     const rows=[];let used=0;try{for(let i=0;i<localStorage.length;i++){const k=localStorage.key(i);used+=k.length+(localStorage.getItem(k)||'').length}}catch(e){}
     (await Promise.all(list.map(async([k,label])=>({k,label,r:await readCourseKey(k)})))).forEach(x=>{if(x.r.status!=='none')rows.push(x)});  // まとめて並行に確認
@@ -854,9 +917,30 @@ const editor=EDIT?(function(){
     const u=document.createElement('div');u.className='rn';u.textContent='端末の保存容量の使用：約'+Math.round(used*2/1024)+'KB';el.appendChild(u);
     rec.onclick=e=>{const t=e.target;if(t.dataset.a==='close'){rec.style.display='none';return}if(t.dataset.i==null)return;const x=rows[+t.dataset.i];
       if(!confirm('「'+x.label+'」のコースで今の表示を置き換えますか？\n今の状態は「元に戻す」と世代バックアップで戻せます'))return;
-      pushUndo();cancelInteraction();courseGeo=HappoCourses.normalizeCourses(x.r.geo,{width:COURSE.width});editSel=null;vSel=[];hideMenu();drawCourses();save();markers();info();
+      pushUndo();cancelInteraction();courseGeo=HappoCourses.normalizeCourses(x.r.geo,{width:COURSE.width});courseBase.fromEdit=true;courseBase.hold=false;editSel=null;vSel=[];hideMenu();drawCourses();save();markers();info();
       courseLog.add('✓ 「'+x.label+'」から'+courseGeo.features.filter(isCourse).length+'件を復元しました','ok');rec.style.display='none'}}
   $('eRecover').onclick=()=>{openRecover().catch(e=>alert('確認できませんでした：'+(e&&e.message||e)))};
+  // 前の版に戻す（押すたびに1つ前へ。今の版はバックアップの最後に回るので消えない）
+  let prevBusy=false;
+  $('ePrev').onclick=()=>{if(prevBusy)return;prevBusy=true;$('ePrev').disabled=true;stepPrev().finally(()=>{prevBusy=false;$('ePrev').disabled=false})};  // 処理中の連打は無視
+  async function stepPrev(){if(saveT){clearTimeout(saveT);saveT=null;if(!courseBase.hold){const r=await saveCoursesSafe(COURSE.keys.edit,courseGeo);if(!r.ok&&!r.ask)showSave(r)}}  // 保存待ちの変更を先に保存
+    const r1=await readCourseKey(genKey(COURSE.keys.edit,1));if(!r1.geo){alert('戻せる前の版がありません');return}
+    const t=r1.edited?new Date(r1.edited):null,ts=t&&!isNaN(t)?(t.getMonth()+1)+'/'+t.getDate()+' '+t.getHours()+':'+String(t.getMinutes()).padStart(2,'0'):'日時不明';
+    if(!confirm('1つ前の版（コース'+courseCount(r1.geo)+'件・'+ts+'保存）に戻しますか？\n今の版はバックアップに残ります（もう一度押すとさらに前へ）'))return;
+    const r=await stepBackCourses(COURSE.keys.edit);if(!r.ok){alert(r.why);return}
+    pushUndo();cancelInteraction();courseGeo=HappoCourses.normalizeCourses(r.geo,{width:COURSE.width});courseBase.hold=false;editSel=null;vSel=[];hideMenu();drawCourses();markers();info();
+    document.getElementById('courseInfo').textContent=courseCounts()+'（前の版に戻しました・'+ts+'保存の版）';courseLog.add('✓ 前の版に戻しました（コース'+r.n+'件）','ok')}
+  // ファイルとして保存（共有シートの「ファイルに保存」でiPadのファイルAppへ）
+  $('eFile').onclick=()=>{const v=validateCourseGeo(courseGeo);if(!v.ok&&!confirm('データに問題があります（'+v.why+'）。そのまま書き出しますか？'))return;
+    const g=v.ok?v.geo:JSON.parse(JSON.stringify(courseGeo,(k,x)=>k.startsWith('__')?undefined:x));
+    saveAsFile(g,stampName('happo-courses','.geojson')).then(m=>{if(m==='download')courseLog.add('✓ ファイルをダウンロードしました（ファイルApp →「ダウンロード」）','ok');else if(m==='shared')courseLog.add('✓ ファイルを書き出しました','ok')})};
+  // ファイルから読み込む（旧形式も変換して読む）
+  $('eLoadFile').onclick=()=>$('eFileIn').click();
+  $('eFileIn').onchange=async e=>{const f=e.target.files&&e.target.files[0];e.target.value='';if(!f)return;
+    const r=await readCourseText(await f.text(),f.size);if(!r.geo){alert('読み込めませんでした（'+(r.why||'不明')+'）');return}
+    if(!confirm('「'+f.name+'」（コース'+courseCount(r.geo)+'件'+(r.status==='salvaged'?'・一部壊れていたため読める部分のみ':'')+(r.from<COURSE_FORMAT?'・旧形式から変換':'')+'）で今の表示を置き換えますか？\n今の版はバックアップに残ります'))return;
+    pushUndo();cancelInteraction();courseGeo=HappoCourses.normalizeCourses(r.geo,{width:COURSE.width});courseBase.fromEdit=true;courseBase.hold=false;editSel=null;vSel=[];hideMenu();drawCourses();save();markers();info();
+    courseLog.add('✓ 「'+f.name+'」から読み込みました','ok')};
   info();
   return {markers,info,cancelInteraction,save,openRecover};
 })():null;
@@ -1052,7 +1136,7 @@ async function loadObj3d(kind,forceOsm){const S=OBJ3D_SRC[kind];let geo=null,src
   if(kind==='buildings'){const before=geo.features.length;geo={...geo,features:geo.features.filter(buildingInKml)};if(before!==geo.features.length)obj3dLog.add('・建物：管理区域KMLの範囲外の'+(before-geo.features.length)+'件を除外')}  // ファイル・端末の保存から読んだ場合も範囲外は表示しない
   S.set(geo);const n=geo.features.length;obj3dCount[kind]=n+'件（'+src+'）';showObj3dInfo();
   const m=await S.draw();if(kind==='lifts'){const L=geo.features.filter(isLiftF),boxes=L.reduce((k,f)=>k+(f.properties.stations||[]).filter(x=>x.pos).length,0);obj3dCount[kind]=L.length+'本・支柱'+m+'本・駅舎の箱'+boxes+'（'+src+'）'}showObj3dInfo();obj3dLog.add('✓ '+S.label+'：'+n+'件を表示','ok')}
-function downloadGeo(geo,name){if(!geo){alert('まだデータがありません');return}const a=document.createElement('a');a.href=URL.createObjectURL(new Blob([JSON.stringify(geo)],{type:'application/geo+json'}));a.download=name;document.body.appendChild(a);a.click();setTimeout(()=>{URL.revokeObjectURL(a.href);a.remove()},1000)}
+function downloadGeo(geo,name){if(!geo){alert('まだデータがありません');return}saveAsFile(geo,name)}
 document.getElementById('liftsOn').onchange=e=>{liftPrims.show=e.target.checked;scene.requestRender()};
 document.getElementById('bldOn').onchange=()=>updateBuildingVisibility();
 document.getElementById('liftsExport').onclick=()=>downloadGeo(lifts3dGeo,'lifts3d.geojson');
