@@ -34,6 +34,7 @@ input:not([type=range]):not([type=checkbox]):not([type=color]):not([type=button]
 #obj3dInfo{font-size:11px;color:#555}
 #obj3dStatus{font-size:10.5px;color:#444;line-height:1.35;max-height:80px;overflow-y:auto;white-space:pre-wrap}
 #obj3dStatus .ng{color:#c62828}#obj3dStatus .ok{color:#2e7d32}
+#bldDiag{font-size:11px;margin:2px 0}#bldDiag summary{cursor:pointer;color:#1a73e8}#bldDiagBody{max-height:160px;overflow-y:auto;line-height:1.4;white-space:pre-wrap;color:#333}#bldDiagBody .ng{color:#c62828}#bldDiagBody .ok{color:#2e7d32}
 #courseRow input[type=range]{width:80px;vertical-align:middle;touch-action:pan-x}
 #courseInfo{font-size:11px;color:#555}
 #courseStatus{font-size:10.5px;color:#444;line-height:1.35;max-height:110px;overflow-y:auto;touch-action:pan-y;white-space:pre-wrap}
@@ -81,7 +82,7 @@ input:not([type=range]):not([type=checkbox]):not([type=color]):not([type=button]
   <div><button id="top">真上から</button><button id="oblique">斜めから</button><button id="contour">等高線 ON</button><button id="slope">ゲレンデ向き</button></div>
   <div><button id="viewSave">現在の視点を初期位置にする</button><button id="viewCopy">初期視点をコピー</button></div>
   <div id="courseRow"><label><input type="checkbox" id="courseOn" checked>コース</label> 透明度 <input type="range" id="courseAlpha" min="0.1" max="0.9" step="0.05" value="0.45"><div id="courseInfo">コース読み込み中…</div><div id="courseStatus"></div><button id="courseRetry" style="display:none">再取得</button></div>
-  <div id="obj3dRow"><label><input type="checkbox" id="liftsOn" checked>リフト3D</label> <label><input type="checkbox" id="bldOn" checked>建物（近づくと表示）</label><div id="obj3dInfo"></div><div id="obj3dStatus"></div><button id="liftsExport">lifts3d書き出し</button><button id="bldExport">buildings書き出し</button><button id="obj3dRefetch">OSM再取得</button></div>
+  <div id="obj3dRow"><label><input type="checkbox" id="liftsOn" checked>リフト3D</label> <label><input type="checkbox" id="bldOn" checked>建物（近づくと表示）</label><div id="obj3dInfo"></div><div id="obj3dStatus"></div><details id="bldDiag"><summary>建物の診断（取得→範囲判定→描画）</summary><div id="bldDiagBody">まだ読み込んでいません</div></details><button id="liftsExport">lifts3d書き出し</button><button id="bldExport">buildings書き出し</button><button id="obj3dRefetch">OSM再取得</button></div>
   <div><button id="newRope">新しいロープ</button><button id="draw">点を打つ</button><button id="undo">1点戻す</button></div>
   <div id="ropeList"></div>
   <div id="total">合計: 0 m</div>
@@ -1032,13 +1033,24 @@ function buildingHeight(t){const num=v=>{const x=parseFloat(String(v||'').replac
   const h=num(t.height);if(h)return {height:+h.toFixed(1),heightSource:'height'};
   const lv=num(t['building:levels']);if(lv)return {height:+(lv*OBJ3D.levelHeight).toFixed(1),levels:lv,heightSource:'levels'};
   return {height:+(OBJ3D.defaultLevels*OBJ3D.levelHeight).toFixed(1),levels:OBJ3D.defaultLevels,heightSource:'default'}}
-function osmToBuildings(osm){const feats=[],ll=g=>g.map(p=>[+p.lon.toFixed(7),+p.lat.toFixed(7)]);
-  for(const e of osm.elements||[]){const t=e.tags||{};if(!t.building)continue;let ring=null;
+const BLD_DATA_VERSION=3;  // 3：名前付き施設の点も取得し、名前の無い建物に名前を付ける
+function ptInRing(q,r){let ins=false;for(let i=0,j=r.length-1;i<r.length;j=i++){const a=r[i],b=r[j];if((a[1]>q[1])!==(b[1]>q[1])&&q[0]<(b[0]-a[0])*(q[1]-a[1])/(b[1]-a[1])+a[0])ins=!ins}return ins}
+function osmToBuildings(osm){const feats=[],pois=[],failed=[],ll=g=>g.map(p=>[+p.lon.toFixed(7),+p.lat.toFixed(7)]);
+  const els=osm.elements||[],st={elements:els.length,ways:0,relations:0,poiNodes:0};
+  for(const e of els){const t=e.tags||{},name=t.name||t['name:ja']||'';
+    if(e.type==='node'){if(name&&e.lat!=null){st.poiNodes++;pois.push({id:'node/'+e.id,name,q:[+e.lon.toFixed(7),+e.lat.toFixed(7)],type:t.tourism||t.amenity||t.shop||''})}continue}  // 名前付きの施設（点）
+    if(!t.building)continue;if(e.type==='way')st.ways++;else if(e.type==='relation')st.relations++;let ring=null;
     if(e.type==='way'&&e.geometry)ring=HappoCourses.cleanRing(ll(e.geometry),false);
     else if(e.type==='relation'&&e.members){const outs=HappoCourses.joinRings(e.members.filter(m=>m.type==='way'&&m.geometry&&m.role!=='inner').map(m=>ll(m.geometry)));if(outs[0])ring=HappoCourses.cleanRing(outs[0],false)}
-    if(!ring)continue;
-    feats.push({type:'Feature',properties:Object.assign({id:e.type+'/'+e.id,name:t.name||t['name:ja']||''},buildingHeight(t)),geometry:{type:'Polygon',coordinates:[ring]}})}
-  return {type:'FeatureCollection',properties:{source:'OpenStreetMap (Overpass API)',license:'ODbL © OpenStreetMap contributors',note:'高さ：height → building:levels×'+OBJ3D.levelHeight+'m → 無ければ'+OBJ3D.defaultLevels+'階建て',generated:new Date().toISOString()},features:feats}}
+    if(!ring){failed.push(name||e.type+'/'+e.id);continue}
+    feats.push({type:'Feature',properties:Object.assign({id:e.type+'/'+e.id,name},buildingHeight(t)),geometry:{type:'Polygon',coordinates:[ring]}})}
+  // 施設の点が建物の中にあれば、その建物の名前にする（OSMでは名前が建物ではなく中の点に付いていることが多い）
+  const poiFeats=[];
+  for(const p of pois){const inside=feats.filter(f=>ptInRing(p.q,f.geometry.coordinates[0]));
+    if(inside.length){const b=inside.find(f=>!f.properties.name);if(b){b.properties.name=p.name;b.properties.nameFrom=p.id}continue}
+    poiFeats.push({type:'Feature',properties:{id:p.id,kind:'poi',name:p.name,poiType:p.type},geometry:{type:'Point',coordinates:p.q}})}  // 建物が無い施設は名前だけ表示
+  return {type:'FeatureCollection',properties:{source:'OpenStreetMap (Overpass API)',license:'ODbL © OpenStreetMap contributors',note:'高さ：height → building:levels×'+OBJ3D.levelHeight+'m → 無ければ'+OBJ3D.defaultLevels+'階建て。建物の無い名前付き施設は kind=poi の点',
+    generated:new Date().toISOString(),dataVersion:BLD_DATA_VERSION,stats:Object.assign(st,{converted:feats.length,convertFailed:failed})},features:[...feats,...poiFeats]}}
 async function overpassQuery(q,label){
   for(const url of COURSE.overpass){const host=new URL(url).host,ac=new AbortController(),tm=setTimeout(()=>ac.abort(),60000);
     try{const r=await fetch(url,{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:'data='+encodeURIComponent(q),signal:ac.signal});if(!r.ok)throw new Error('HTTP '+r.status);
@@ -1112,15 +1124,46 @@ async function drawLifts(){liftPrims.removeAll();pylonGroup=stationGroup=wireCol
   for(const Ld of Ls){Ld.wire=null;setWire(Ld)}
   buildStations();buildPylons();scene.requestRender();return Ls.reduce((n,Ld)=>n+Ld.towers.length,0)}
 // --- 建物 ---
-async function drawBuildings(){bldPrims.removeAll();dropChunks('bld');if(!buildingsGeo)return 0;const items=[],labels=new Cesium.LabelCollection({scene});let n=0;
-  for(const f of buildingsGeo.features){const ring=f.geometry.coordinates[0];if(!ring||ring.length<4)continue;
+let bldDiagState=null;
+// 建物を描く：1棟ずつ形を作ってみて、作れたものだけをまとめて描く（不正な形が1つあっても他が消えないように）
+async function drawBuildings(){bldPrims.removeAll();dropChunks('bld');if(!buildingsGeo)return 0;const items=[],labels=new Cesium.LabelCollection({scene}),bad=[],drawn=[],labeled=[];
+  const VF=Cesium.PerInstanceColorAppearance.VERTEX_FORMAT,attrs=c=>instAttrs(c,OBJ3D.buildingFar);
+  for(const f of buildingsGeo.features){const g=f.geometry;
+    if(g.type==='Point'){const q=g.coordinates,h=await sampleGround(q[0],q[1]);  // 建物の無い施設：名前だけ
+      labels.add({position:Cesium.Cartesian3.fromDegrees(q[0],q[1],h+8),text:f.properties.name,font:'bold 12px sans-serif',fillColor:Cesium.Color.fromCssColorString('#222'),outlineColor:Cesium.Color.WHITE,outlineWidth:3,style:Cesium.LabelStyle.FILL_AND_OUTLINE,distanceDisplayCondition:new Cesium.DistanceDisplayCondition(0,OBJ3D.labelFar),verticalOrigin:Cesium.VerticalOrigin.BOTTOM});
+      labeled.push(f.properties.name);continue}
+    const ring=g.coordinates[0];if(!ring||ring.length<4){bad.push(f.properties.name||f.properties.id);continue}
     const step=Math.max(1,Math.floor((ring.length-1)/8)),samples=await Promise.all(ring.slice(0,-1).filter((_,i)=>i%step===0).map(q=>sampleGround(q[0],q[1])));
     const base=Math.min(...samples)-1,top=Math.max(...samples)+(f.properties.height||OBJ3D.defaultLevels*OBJ3D.levelHeight);  // 斜面でも埋もれ・浮きが出ないよう低い側に底、高い側から高さを取る
-    items.push(prism(ring,base,top,BLD_MAT,BLD_OUT,OBJ3D.buildingFar));n++;
-    if(f.properties.name){const c=ringCenter(ring);
+    let fillG,lineG;
+    try{const h=new Cesium.PolygonHierarchy(Cesium.Cartesian3.fromDegreesArray(ring.flat()));
+      fillG=Cesium.PolygonGeometry.createGeometry(new Cesium.PolygonGeometry({polygonHierarchy:h,height:base,extrudedHeight:top,vertexFormat:VF}));
+      lineG=Cesium.PolygonOutlineGeometry.createGeometry(new Cesium.PolygonOutlineGeometry({polygonHierarchy:h,height:base,extrudedHeight:top}))}catch(e){fillG=null}
+    if(!fillG){bad.push(f.properties.name||f.properties.id);continue}
+    items.push({ll:polyCentroid(ring),pts:ring.flatMap(q=>[Cesium.Cartesian3.fromDegrees(q[0],q[1],base),Cesium.Cartesian3.fromDegrees(q[0],q[1],top)]),
+      fill:new Cesium.GeometryInstance({geometry:fillG,attributes:attrs(BLD_MAT)}),line:lineG&&new Cesium.GeometryInstance({geometry:lineG,attributes:attrs(BLD_OUT)})});
+    drawn.push(f);
+    if(f.properties.name){const c=polyCentroid(ring);labeled.push(f.properties.name);
       labels.add({position:Cesium.Cartesian3.fromDegrees(c[0],c[1],top+4),text:f.properties.name,font:'bold 12px sans-serif',fillColor:Cesium.Color.fromCssColorString('#222'),outlineColor:Cesium.Color.WHITE,outlineWidth:3,style:Cesium.LabelStyle.FILL_AND_OUTLINE,distanceDisplayCondition:new Cesium.DistanceDisplayCondition(0,OBJ3D.labelFar),verticalOrigin:Cesium.VerticalOrigin.BOTTOM})}}
-  if(items.length)batch(bldPrims,'bld',items,{chunk:true,far:OBJ3D.buildingFar,translucent:true,async:true,top:bldPrims});
-  bldPrims.add(labels);updateBuildingVisibility();scene.requestRender();return n}
+  let made=[];try{if(items.length)made=batch(bldPrims,'bld',items,{chunk:true,far:OBJ3D.buildingFar,translucent:true,async:false,top:bldPrims})}catch(e){obj3dLog.add('✗ 建物の描画に失敗：'+(e&&e.message||e),'ng')}
+  bldPrims.add(labels);updateBuildingVisibility();scene.requestRender();
+  showBldDiag({drawn,bad,labeled,prims:made.length});return drawn.length}
+// 診断の表示：Overpassから取れた件数 → 建物に変換できた件数 → 範囲判定を通った件数 → 描画できた件数。名前付きの建物・施設はそれぞれどこで落ちたかを出す
+function showBldDiag(d){const el=document.getElementById('bldDiagBody');if(!el)return;el.textContent='';const S=bldDiagState||{},st=S.stats,line=(t,c)=>{const x=document.createElement('div');x.textContent=t;if(c)x.className=c;el.appendChild(x)};
+  const nb=a=>a.filter(x=>x.f.geometry.type==='Polygon').length,np=a=>a.filter(x=>x.f.geometry.type==='Point').length;
+  line('読み込み元：'+(S.src||'不明'));
+  if(st)line('① Overpassの取得：要素'+st.elements+'件（建物way '+st.ways+'・建物relation '+st.relations+'・名前付き施設の点 '+st.poiNodes+'）');else line('① Overpassの取得：（ファイル・保存データから読んだため件数なし）');
+  if(st)line('② 建物の形に変換：'+st.converted+'件'+(st.convertFailed&&st.convertFailed.length?'（変換できず'+st.convertFailed.length+'件：'+st.convertFailed.slice(0,5).join('、')+'）':''),st.convertFailed&&st.convertFailed.length?'ng':'');
+  if(S.all)line('③ 範囲判定：建物'+nb(S.all)+'件中'+nb(S.kept)+'件・施設の点'+np(S.all)+'件中'+np(S.kept)+'件を通過（除外'+S.out.length+'件）',S.out.length?'ng':'ok');
+  line('④ 描画：建物'+d.drawn.length+'棟（まとめ描き'+d.prims+'個）・ラベル'+d.labeled.length+'件'+(d.bad.length?'・形が不正で描けず'+d.bad.length+'件：'+d.bad.slice(0,5).join('、'):''),d.bad.length?'ng':'ok');
+  line('表示距離：建物・ラベルとも'+OBJ3D.buildingFar/1000+'km以内／編集モードでは非表示');
+  // 名前付きの建物・施設の内訳
+  const names=new Map();for(const x of S.kept||[]){const n=x.f.properties.name;if(n)names.set(n,x.f.geometry.type==='Point'?'名前のみ表示（OSMに建物の形が無い施設）':'')}
+  for(const f of d.drawn){if(f.properties.name)names.set(f.properties.name,'建物＋名前を表示'+(f.properties.nameFrom?'（名前は中の施設の点から）':''))}
+  for(const n of d.bad)if(names.has(n))names.set(n,'✗ 形が不正で描けず');
+  for(const x of S.out||[]){const n=x.f.properties.name;if(n&&!names.has(n))names.set(n,'✗ 範囲外（区域の境界から'+x.k.d+'m）')}
+  if(names.size){line('— 名前付きの建物・施設（'+names.size+'件）—');[...names].sort((a,b)=>a[0].localeCompare(b[0],'ja')).forEach(([n,t])=>line(n+'：'+t,/^✗/.test(t)?'ng':''))}
+  const summary='建物：取得'+(st?(st.ways+st.relations)+'棟＋施設の点'+st.poiNodes:'（ファイル）')+' → 範囲内'+(S.kept?S.kept.length:'?')+' → 描画'+d.drawn.length+'棟・ラベル'+d.labeled.length;obj3dLog.add(summary,d.drawn.length?'ok':'ng')}
 // 建物の表示は「チェック」と「編集モードでない」だけで決め、遠さは1棟ごとの表示距離(2km)に任せる。
 // （以前はカメラの地表からの高さで丸ごと隠していたが、地表の高さが取れないと海抜で判定してしまい、山の上では常に隠れていた）
 function updateBuildingVisibility(){const on=!EDIT&&document.getElementById('bldOn').checked;if(bldPrims.show!==on){bldPrims.show=on;scene.requestRender()}}
@@ -1144,19 +1187,26 @@ function kmlDist(q){let d=Infinity;const x=q[0]*KML_KX,y=q[1]*KML_KY,n=KML_RING.
 function polyCentroid(r){let A=0,cx=0,cy=0;const o=r[0];for(let i=0;i<r.length-1;i++){const x0=(r[i][0]-o[0])*KML_KX,y0=(r[i][1]-o[1])*KML_KY,x1=(r[i+1][0]-o[0])*KML_KX,y1=(r[i+1][1]-o[1])*KML_KY,c=x0*y1-x1*y0;A+=c;cx+=(x0+x1)*c;cy+=(y0+y1)*c}
   if(Math.abs(A)<1e-6)return ringCenter(r);return [o[0]+cx/(3*A)/KML_KX,o[1]+cy/(3*A)/KML_KY]}
 function inKml(q){let ins=false;for(let i=0,j=boundary.length-1;i<boundary.length;j=i++){const a=boundary[i],b=boundary[j];if((a[1]>q[1])!==(b[1]>q[1])&&q[0]<(b[0]-a[0])*(q[1]-a[1])/(b[1]-a[1])+a[0])ins=!ins}return ins}
-const buildingInKml=f=>{const r=f.geometry&&f.geometry.coordinates&&f.geometry.coordinates[0];if(!r||r.length<4)return false;const c=polyCentroid(r);return inKml(c)||kmlDist(c)<=OBJ3D.kmlMargin};  // 重心が区域内（境界から50m外側まで）なら含める
+// 範囲判定：重心が区域内 → 含める。縁の建物は、どこか1点でも区域内か、境界から kmlMargin(m) 以内なら含める。施設の点は区域内か境界から kmlMargin 以内
+function kmlCheck(f){const g=f.geometry,M=OBJ3D.kmlMargin;if(!g)return {ok:false,d:Infinity};
+  if(g.type==='Point'){const q=g.coordinates;if(inKml(q))return {ok:true};const d=kmlDist(q);return {ok:d<=M,d:Math.round(d),edge:true}}
+  const r=g.coordinates&&g.coordinates[0];if(!r||r.length<4)return {ok:false,d:Infinity};
+  const c=polyCentroid(r);if(inKml(c))return {ok:true};let dm=kmlDist(c);
+  for(const q of r){if(inKml(q))return {ok:true,edge:true};dm=Math.min(dm,kmlDist(q))}
+  return {ok:dm<=M,d:Math.round(dm),edge:true}}
+const buildingInKml=f=>kmlCheck(f).ok;
 const OBJ3D_SRC={
   lifts:{label:'リフト',query:()=>'[out:json][timeout:60];way["aerialway"]('+BB()+')->.l;.l out geom;node(w.l)["aerialway"~"^(pylon|station)$"];out;',convert:osmToLifts3d,set:g=>{lifts3dGeo=g},draw:drawLifts},
-  buildings:{label:'建物',query:()=>'[out:json][timeout:90];(way["building"](poly:"'+KML_POLY()+'");relation["building"]["type"="multipolygon"](poly:"'+KML_POLY()+'"););out geom;',convert:osmToBuildings,set:g=>{buildingsGeo=g},draw:drawBuildings}};
+  buildings:{label:'建物',query:()=>{const P='(poly:"'+KML_POLY()+'")';return '[out:json][timeout:90];(way["building"]'+P+';relation["building"]["type"="multipolygon"]'+P+';node["name"]["tourism"]'+P+';node["name"]["amenity"]'+P+';node["name"]["shop"]'+P+';);out geom;'},convert:osmToBuildings,set:g=>{buildingsGeo=g},draw:drawBuildings}};
 const obj3dCount={};
 function showObj3dInfo(){document.getElementById('obj3dInfo').textContent=['lifts','buildings'].map(k=>OBJ3D_SRC[k].label+(obj3dCount[k]||'未読み込み')).join('／')}
 async function loadObj3d(kind,forceOsm){const S=OBJ3D_SRC[kind];let geo=null,src='';
   if(!forceOsm&&EDIT&&kind==='lifts'){const v=lsGet(OBJ3D.keys.liftsEdit);if(v&&v.features&&v.features.length){geo=v;src='端末で編集中のデータ'}}
   if(!forceOsm&&!geo){try{const r=await fetch(OBJ3D.files[kind],{cache:'no-cache'});if(r.ok){geo=await r.json();src=OBJ3D.files[kind].split('/').pop()}else obj3dLog.add('・'+S.label+'：'+OBJ3D.files[kind].split('/').pop()+' はまだ無い')}catch(e){}
-    if(!geo){const v=lsGet(OBJ3D.keys[kind]);if(v&&v.features&&v.features.length){if(kind==='buildings'&&(v.properties||{}).kmlMargin!==OBJ3D.kmlMargin)obj3dLog.add('・建物：端末の取得結果は区域を広げる前のものなので取り直します');else{geo=v;src='端末に保存した取得結果'}}}}
+    if(!geo){const v=lsGet(OBJ3D.keys[kind]);if(v&&v.features&&v.features.length){if(kind==='buildings'&&((v.properties||{}).kmlMargin!==OBJ3D.kmlMargin||(v.properties||{}).dataVersion!==BLD_DATA_VERSION))obj3dLog.add('・建物：端末の取得結果は古い取得方法のものなので取り直します');else{geo=v;src='端末に保存した取得結果'}}}}
   if(!geo){obj3dLog.add('… '+S.label+'をOpenStreetMapから取得中');try{geo=S.convert(await overpassQuery(S.query(),S.label));if(kind==='buildings')geo.properties.kmlMargin=OBJ3D.kmlMargin;src='OSMから取得';if(!lsSet(OBJ3D.keys[kind],geo))obj3dLog.add('・'+S.label+'：端末に保存できませんでした（容量不足）。書き出しボタンで保存してください')}
     catch(e){obj3dLog.add('✗ '+S.label+'を取得できませんでした','ng');obj3dCount[kind]='：取得失敗';showObj3dInfo();return}}
-  if(kind==='buildings'){const before=geo.features.length;geo={...geo,features:geo.features.filter(buildingInKml)};obj3dLog.add('・建物：データ'+before+'件のうち、区域内（境界の'+OBJ3D.kmlMargin+'m外側まで）'+geo.features.length+'件を表示'+(before!==geo.features.length?'（範囲外'+(before-geo.features.length)+'件を除外）':''),geo.features.length?'':'ng')}  // ファイル・端末の保存から読んだ場合も範囲外は表示しない
+  if(kind==='buildings'){const all=geo.features,kept=[],out=[];for(const f of all){const k=kmlCheck(f);(k.ok?kept:out).push({f,k})}geo={...geo,features:kept.map(x=>x.f)};bldDiagState={src,stats:(geo.properties&&geo.properties.stats)||null,all:[...kept,...out],kept,out};}  // 範囲外は表示しない（内訳は診断に出す）  // ファイル・端末の保存から読んだ場合も範囲外は表示しない
   S.set(geo);const n=geo.features.length;obj3dCount[kind]=n+'件（'+src+'）';showObj3dInfo();
   const m=await S.draw();if(kind==='lifts'){const L=geo.features.filter(isLiftF),boxes=L.reduce((k,f)=>k+(f.properties.stations||[]).filter(x=>x.pos).length,0);obj3dCount[kind]=L.length+'本・支柱'+m+'本・駅舎の箱'+boxes+'（'+src+'）'}showObj3dInfo();obj3dLog.add('✓ '+S.label+'：'+n+'件を表示','ok')}
 function downloadGeo(geo,name){if(!geo){alert('まだデータがありません');return}saveAsFile(geo,name)}
