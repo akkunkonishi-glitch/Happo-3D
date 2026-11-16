@@ -31,7 +31,7 @@ input:not([type=range]):not([type=checkbox]):not([type=color]):not([type=button]
 #total{font-weight:bold;margin-top:2px;font-size:13px}
 #courseRow{font-size:12px;margin-top:4px;padding-top:4px;border-top:1px solid #ddd}
 #obj3dRow{font-size:12px;margin-top:4px;padding-top:4px;border-top:1px solid #ddd}
-#obj3dInfo{font-size:11px;color:#555}
+#obj3dInfo{font-size:11px;color:#555}#obj3dInfo .ng{color:#c62828;font-weight:bold}#obj3dInfo .ok{color:#2e7d32}
 #obj3dStatus{font-size:10.5px;color:#444;line-height:1.35;max-height:80px;overflow-y:auto;white-space:pre-wrap}
 #obj3dStatus .ng{color:#c62828}#obj3dStatus .ok{color:#2e7d32}
 #bldDiag{font-size:11px;margin:2px 0}#bldDiag summary{cursor:pointer;color:#1a73e8}#bldDiagBody{max-height:160px;overflow-y:auto;line-height:1.4;white-space:pre-wrap;color:#333}#bldDiagBody .ng{color:#c62828}#bldDiagBody .ok{color:#2e7d32}
@@ -1051,12 +1051,18 @@ function osmToBuildings(osm){const feats=[],pois=[],failed=[],ll=g=>g.map(p=>[+p
     poiFeats.push({type:'Feature',properties:{id:p.id,kind:'poi',name:p.name,poiType:p.type},geometry:{type:'Point',coordinates:p.q}})}  // 建物が無い施設は名前だけ表示
   return {type:'FeatureCollection',properties:{source:'OpenStreetMap (Overpass API)',license:'ODbL © OpenStreetMap contributors',note:'高さ：height → building:levels×'+OBJ3D.levelHeight+'m → 無ければ'+OBJ3D.defaultLevels+'階建て。建物の無い名前付き施設は kind=poi の点',
     generated:new Date().toISOString(),dataVersion:BLD_DATA_VERSION,stats:Object.assign(st,{converted:feats.length,convertFailed:failed})},features:[...feats,...poiFeats]}}
-async function overpassQuery(q,label){
-  for(const url of COURSE.overpass){const host=new URL(url).host,ac=new AbortController(),tm=setTimeout(()=>ac.abort(),60000);
+async function overpassQuery(q,label,timeoutMs){const why=[];timeoutMs=timeoutMs||60000;
+  for(const url of COURSE.overpass){const host=new URL(url).host,ac=new AbortController(),tm=setTimeout(()=>ac.abort(),timeoutMs);
+    setObj3dState(label,'取得中…（'+host+'に問い合わせ中）');
     try{const r=await fetch(url,{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:'data='+encodeURIComponent(q),signal:ac.signal});if(!r.ok)throw new Error('HTTP '+r.status);
-      const j=await r.json();obj3dLog.add('✓ '+label+'：'+host+' から取得','ok');return j}
-    catch(e){obj3dLog.add('✗ '+label+'：'+host+'：'+whyFailed(e),'ng')}finally{clearTimeout(tm)}}
-  throw new Error('すべてのOverpassミラーで取得できませんでした')}
+      let j;try{j=await r.json()}catch(x){throw new Error('応答がJSONではない（サーバーのエラーページ）')}
+      if(j&&j.remark&&/error|timed out|runtime/i.test(j.remark)&&!(j.elements||[]).length)throw new Error('サーバー側で打ち切り（'+String(j.remark).slice(0,60)+'）');
+      obj3dLog.add('✓ '+label+'：'+host+' から取得（要素'+(j.elements||[]).length+'件）','ok');return j}
+    catch(e){const m=e&&e.name==='AbortError'?'タイムアウト（'+timeoutMs/1000+'秒）':whyFailed(e);why.push(host+'：'+m);obj3dLog.add('✗ '+label+'：'+host+'：'+m,'ng')}finally{clearTimeout(tm)}}
+  const err=new Error(why.join('／'));err.reasons=why;throw err}
+// パネルに常に出す状態（ログが流れても消えない）
+const obj3dState={};
+function setObj3dState(label,t,cls){const k=label==='建物'?'buildings':'lifts';obj3dState[k]={t,cls};showObj3dInfo()}
 // --- 描画 ---
 // --- 描画：Entityを1つずつ描かず、Primitiveにまとめて一括で描く（GPUへの描画命令が数個で済む）---
 // 建物と支柱は約450m四方ごとに1つのPrimitiveにまとめる。各まとまりは自分の範囲を囲む球(boundingSphere)を持つので、
@@ -1166,7 +1172,7 @@ function showBldDiag(d){const el=document.getElementById('bldDiagBody');if(!el)r
   const summary='建物：取得'+(st?(st.ways+st.relations)+'棟＋施設の点'+st.poiNodes:'（ファイル）')+' → 範囲内'+(S.kept?S.kept.length:'?')+' → 描画'+d.drawn.length+'棟・ラベル'+d.labeled.length;obj3dLog.add(summary,d.drawn.length?'ok':'ng')}
 // 建物の表示は「チェック」と「編集モードでない」だけで決め、遠さは1棟ごとの表示距離(2km)に任せる。
 // （以前はカメラの地表からの高さで丸ごと隠していたが、地表の高さが取れないと海抜で判定してしまい、山の上では常に隠れていた）
-function updateBuildingVisibility(){const on=!EDIT&&document.getElementById('bldOn').checked;if(bldPrims.show!==on){bldPrims.show=on;scene.requestRender()}}
+function updateBuildingVisibility(){const on=document.getElementById('bldOn').checked;if(bldPrims.show!==on){bldPrims.show=on;scene.requestRender()}}
 camera.changed.addEventListener(updateBuildingVisibility);camera.moveEnd.addEventListener(updateBuildingVisibility);
 // --- 読み込み ---
 const BB=()=>{const [s_,w_,n_,e_]=COURSE.bbox;return s_+','+w_+','+n_+','+e_};
@@ -1197,21 +1203,36 @@ function kmlCheck(f){const g=f.geometry,M=OBJ3D.kmlMargin;if(!g)return {ok:false
 const buildingInKml=f=>kmlCheck(f).ok;
 const OBJ3D_SRC={
   lifts:{label:'リフト',query:()=>'[out:json][timeout:60];way["aerialway"]('+BB()+')->.l;.l out geom;node(w.l)["aerialway"~"^(pylon|station)$"];out;',convert:osmToLifts3d,set:g=>{lifts3dGeo=g},draw:drawLifts},
-  buildings:{label:'建物',query:()=>{const P='(poly:"'+KML_POLY()+'")';return '[out:json][timeout:90];(way["building"]'+P+';relation["building"]["type"="multipolygon"]'+P+';node["name"]["tourism"]'+P+';node["name"]["amenity"]'+P+';node["name"]["shop"]'+P+';);out geom;'},convert:osmToBuildings,set:g=>{buildingsGeo=g},draw:drawBuildings}};
+  buildings:{label:'建物',timeout:120000,query:()=>{const P='(poly:"'+KML_POLY()+'")';return '[out:json][timeout:120];(way["building"]'+P+';relation["building"]["type"="multipolygon"]'+P+';node["name"]["tourism"]'+P+';node["name"]["amenity"]'+P+';node["name"]["shop"]'+P+';);out geom;'},convert:osmToBuildings,set:g=>{buildingsGeo=g},draw:drawBuildings}};
 const obj3dCount={};
-function showObj3dInfo(){document.getElementById('obj3dInfo').textContent=['lifts','buildings'].map(k=>OBJ3D_SRC[k].label+(obj3dCount[k]||'未読み込み')).join('／')}
-async function loadObj3d(kind,forceOsm){const S=OBJ3D_SRC[kind];let geo=null,src='';
+function showObj3dInfo(){const el=document.getElementById('obj3dInfo');el.textContent='';
+  for(const k of ['lifts','buildings']){const d=document.createElement('div'),st=obj3dState[k];d.textContent=OBJ3D_SRC[k].label+'：'+(st?st.t:(obj3dCount[k]?obj3dCount[k].replace(/^：/,''):'未読み込み'));if(k==='buildings'&&!document.getElementById('bldOn').checked)d.textContent+=EDIT?'　※編集モードのため非表示（チェックで表示）':'　※チェックが外れているため非表示';if(st&&st.cls)d.className=st.cls;el.appendChild(d)}}
+async function loadObj3d(kind,forceOsm){const S=OBJ3D_SRC[kind];
+  try{await loadObj3dInner(kind,forceOsm)}
+  catch(e){console.error(e);setObj3dState(S.label,'✗ 表示できませんでした（'+String(e&&e.message||e).slice(0,120)+'）','ng');obj3dLog.add('✗ '+S.label+'：'+String(e&&e.message||e),'ng')}}
+async function loadObj3dInner(kind,forceOsm){const S=OBJ3D_SRC[kind];let geo=null,src='';setObj3dState(S.label,'読み込み中…');
   if(!forceOsm&&EDIT&&kind==='lifts'){const v=lsGet(OBJ3D.keys.liftsEdit);if(v&&v.features&&v.features.length){geo=v;src='端末で編集中のデータ'}}
-  if(!forceOsm&&!geo){try{const r=await fetch(OBJ3D.files[kind],{cache:'no-cache'});if(r.ok){geo=await r.json();src=OBJ3D.files[kind].split('/').pop()}else obj3dLog.add('・'+S.label+'：'+OBJ3D.files[kind].split('/').pop()+' はまだ無い')}catch(e){}
+  if(!forceOsm&&!geo){const fname=OBJ3D.files[kind].split('/').pop();  // ① リポジトリの data/*.geojson
+    try{const r=await fetch(OBJ3D.files[kind],{cache:'no-cache'});
+      if(r.ok){try{const g=await r.json();if(g&&Array.isArray(g.features)&&g.features.length){geo=g;src=fname}else obj3dLog.add('・'+S.label+'：'+fname+' は空')}catch(e){obj3dLog.add('✗ '+S.label+'：'+fname+' がJSONとして読めない','ng')}}
+      else obj3dLog.add('・'+S.label+'：リポジトリに '+fname+' は無い（HTTP '+r.status+'）')}catch(e){obj3dLog.add('・'+S.label+'：'+fname+' を読めない（'+whyFailed(e)+'）')}
     if(!geo){const v=lsGet(OBJ3D.keys[kind]);if(v&&v.features&&v.features.length){if(kind==='buildings'&&((v.properties||{}).kmlMargin!==OBJ3D.kmlMargin||(v.properties||{}).dataVersion!==BLD_DATA_VERSION))obj3dLog.add('・建物：端末の取得結果は古い取得方法のものなので取り直します');else{geo=v;src='端末に保存した取得結果'}}}}
-  if(!geo){obj3dLog.add('… '+S.label+'をOpenStreetMapから取得中');try{geo=S.convert(await overpassQuery(S.query(),S.label));if(kind==='buildings')geo.properties.kmlMargin=OBJ3D.kmlMargin;src='OSMから取得';if(!lsSet(OBJ3D.keys[kind],geo))obj3dLog.add('・'+S.label+'：端末に保存できませんでした（容量不足）。書き出しボタンで保存してください')}
-    catch(e){obj3dLog.add('✗ '+S.label+'を取得できませんでした','ng');obj3dCount[kind]='：取得失敗';showObj3dInfo();return}}
-  if(kind==='buildings'){const all=geo.features,kept=[],out=[];for(const f of all){const k=kmlCheck(f);(k.ok?kept:out).push({f,k})}geo={...geo,features:kept.map(x=>x.f)};bldDiagState={src,stats:(geo.properties&&geo.properties.stats)||null,all:[...kept,...out],kept,out};}  // 範囲外は表示しない（内訳は診断に出す）  // ファイル・端末の保存から読んだ場合も範囲外は表示しない
-  S.set(geo);const n=geo.features.length;obj3dCount[kind]=n+'件（'+src+'）';showObj3dInfo();
-  const m=await S.draw();if(kind==='lifts'){const L=geo.features.filter(isLiftF),boxes=L.reduce((k,f)=>k+(f.properties.stations||[]).filter(x=>x.pos).length,0);obj3dCount[kind]=L.length+'本・支柱'+m+'本・駅舎の箱'+boxes+'（'+src+'）'}showObj3dInfo();obj3dLog.add('✓ '+S.label+'：'+n+'件を表示','ok')}
+  if(!geo){obj3dLog.add('… '+S.label+'をOpenStreetMapから取得中');  // ② ブラウザからOverpassで取得
+    let osm;try{osm=await overpassQuery(S.query(),S.label,S.timeout)}
+    catch(e){setObj3dState(S.label,'✗ 取得失敗：'+(e.reasons&&e.reasons.length?e.reasons.join('／'):String(e.message||e)),'ng');obj3dCount[kind]='：取得失敗';return}
+    geo=S.convert(osm);if(kind==='buildings')geo.properties.kmlMargin=OBJ3D.kmlMargin;src='OSMから取得';
+    if(!lsSet(OBJ3D.keys[kind],geo))obj3dLog.add('・'+S.label+'：端末に保存できませんでした（容量不足）。書き出しボタンで保存してください')}
+  if(kind==='buildings'){const all=geo.features,kept=[],out=[];for(const f of all){const k=kmlCheck(f);(k.ok?kept:out).push({f,k})}geo={...geo,features:kept.map(x=>x.f)};bldDiagState={src,stats:(geo.properties&&geo.properties.stats)||null,all:[...kept,...out],kept,out}}  // 範囲外は表示しない（内訳は診断に出す）
+  S.set(geo);const n=geo.features.length;obj3dCount[kind]=n+'件（'+src+'）';setObj3dState(S.label,'描画中…（'+n+'件・'+src+'）');
+  const m=await S.draw();
+  if(kind==='lifts'){const L=geo.features.filter(isLiftF),boxes=L.reduce((k,f)=>k+(f.properties.stations||[]).filter(x=>x.pos).length,0);setObj3dState(S.label,L.length+'本・支柱'+m+'本・駅舎の箱'+boxes+'（'+src+'）','ok')}
+  else{const nb=geo.features.filter(f=>f.geometry.type==='Polygon').length,np=n-nb;
+    setObj3dState(S.label,(m?m+'棟を表示':'表示できる建物が0棟')+'（取得元：'+src+'・区域内の建物'+nb+'件'+(np?'・名前だけの施設'+np+'件':'')+'）',m?'ok':'ng')}
+  obj3dLog.add('✓ '+S.label+'：'+n+'件を表示','ok')}
 function downloadGeo(geo,name){if(!geo){alert('まだデータがありません');return}saveAsFile(geo,name)}
 document.getElementById('liftsOn').onchange=e=>{liftPrims.show=e.target.checked;scene.requestRender()};
-document.getElementById('bldOn').onchange=()=>updateBuildingVisibility();
+if(EDIT){document.getElementById('bldOn').checked=false;document.getElementById('bldOn').parentNode.lastChild.textContent='建物（編集モードでは軽くするため初期は非表示）'}  // チェックすれば編集モードでも表示
+document.getElementById('bldOn').onchange=()=>{updateBuildingVisibility();showObj3dInfo()};
 document.getElementById('liftsExport').onclick=()=>downloadGeo(lifts3dGeo,'lifts3d.geojson');
 document.getElementById('bldExport').onclick=()=>downloadGeo(buildingsGeo,'buildings.geojson');
 document.getElementById('obj3dRefetch').onclick=async()=>{if(!confirm('リフトと建物を OpenStreetMap から取り直しますか？'+(EDIT?'（駅舎の位置の編集は破棄されます）':'')))return;try{localStorage.removeItem(OBJ3D.keys.liftsEdit);localStorage.removeItem(OBJ3D.keys.lifts);localStorage.removeItem(OBJ3D.keys.buildings)}catch(e){}
@@ -1234,8 +1255,8 @@ if(EDIT){let sd=null,raf=0,pvEnt=null;const cv=scene.canvas,loc=e=>{const r=cv.g
     if(s_.moved){await updateLift(s_.st.f);if(pvEnt){viewer.entities.remove(pvEnt);pvEnt=null}buildStations();lifts3dGeo.properties=lifts3dGeo.properties||{};lifts3dGeo.properties.edited=new Date().toISOString();
       const ok=lsSet(OBJ3D.keys.liftsEdit,lifts3dGeo);obj3dLog.add(ok?'✓ 駅舎の位置を保存しました（'+(s_.st.f.properties.name||'リフト')+'）':'✗ 駅舎の位置を端末に保存できませんでした',ok?'ok':'ng')}};
   document.addEventListener('pointerup',up,true);document.addEventListener('pointercancel',up,true);
-  obj3dLog.add('編集モード：リフト両端の駅舎の箱はドラッグで位置を直せます');obj3dLog.add('編集モード中は軽くするため建物と支柱を表示しません')}
-(async()=>{await loadObj3d('lifts');await loadObj3d('buildings')})();
+  obj3dLog.add('編集モード：リフト両端の駅舎の箱はドラッグで位置を直せます');obj3dLog.add('編集モード中は軽くするため支柱を表示しません。建物は初期は非表示で、チェックすると表示します')}
+(async()=>{await loadObj3d('lifts');await loadObj3d('buildings')})();  // loadObj3d は失敗しても例外を投げないので、リフトが失敗しても建物は読む
 // ===== 視点スティック（左下）=====
 // FPSの右スティックと同じ：左右に倒すとその場で左右に回り、上下に倒すと見上げ・見下ろし。カメラの位置は変えない。
 // 倒している間は一定速度で回り続け、離すと即停止。指ごとに追跡するので、ミニマップなどと同時に操作できる。
