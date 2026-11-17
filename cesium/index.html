@@ -111,7 +111,14 @@ const DEFAULT_VIEW={lon:137.814,lat:36.618,height:7500,heading:0,pitch:-32,above
 const VIEW_KEY='happoInitialView';
 const SETTINGS={
   followHeight:20,   // 地表追従の既定の高さ(m)。画面右端のスライダーで2〜100mに変更できる
-  rotateSpeed:1.5,   // 2本指でひねったときの回転の感度(1=指と同じ角度)
+  // --- タッチ操作の感度（ここを変えるだけで調整できる）---
+  rotateSpeed:2.25,  // 2本指でひねったときの回転の感度(1=指と同じ角度)。以前の1.5の1.5倍
+  pinchZoomSpeed:1.5,// ピンチの拡大縮小の感度(1=指の開き具合と同じ倍率。1.5で指を2倍開くと約2.8倍寄る)
+  gestureZoomStart:0.05,  // 2本指の動きを「ピンチ」と判定し始める開き具合(log2。0.05≒3.5%)。小さいほど早く反応
+  gestureRotateStart:4,   // 2本指の動きを「回転」と判定し始める角度(度)。小さいほど早く反応
+  inertiaSpin:0,     // 慣性(0〜1)。0=指を離したら即停止、大きいほど滑る(Cesium標準は0.9)
+  inertiaTranslate:0,
+  inertiaZoom:0,
   tiltSpeed:0.009,   // 2本指上下の傾き・見上げの感度(1pxあたりのラジアン)
   skyDragSpeed:0.006,// 空をドラッグしたときの向きの感度(1pxあたりのラジアン)
   followSmoothing:0.6,// 地表追従で高さを合わせる速さ(0〜1、1で即座)
@@ -374,7 +381,7 @@ scene.canvas.addEventListener('wheel',e=>{if(e.deltaY>0)releaseFollow()},{passiv
 // 傾きは、地表近く(500m以内)ではその場で見上げ・見下ろし（空も見られる）、高い所では注視点の周りで傾ける。
 ssc.zoomEventTypes=[Cesium.CameraEventType.WHEEL,Cesium.CameraEventType.RIGHT_DRAG];
 ssc.tiltEventTypes=[Cesium.CameraEventType.MIDDLE_DRAG,{eventType:Cesium.CameraEventType.LEFT_DRAG,modifier:Cesium.KeyboardEventModifier.CTRL},{eventType:Cesium.CameraEventType.RIGHT_DRAG,modifier:Cesium.KeyboardEventModifier.CTRL}];
-ssc.rotateEventTypes=[];ssc.inertiaSpin=0;ssc.inertiaTranslate=0;ssc.inertiaZoom=0;  // 慣性なし：指を離したらすぐ止まる  // 1本指ドラッグは下の「地面をつかむ」処理で行う
+ssc.rotateEventTypes=[];ssc.inertiaSpin=SETTINGS.inertiaSpin;ssc.inertiaTranslate=SETTINGS.inertiaTranslate;ssc.inertiaZoom=SETTINGS.inertiaZoom;  // 慣性：SETTINGSで調整（0=指を離したらすぐ止まる）  // 1本指ドラッグは下の「地面をつかむ」処理で行う
 (function grabDrag(){
   // 1本指(マウス左)ドラッグ：指の下の地面をつかんで引っ張る。空をつかんだときは向き(方位・見上げ)を変える
   const el=scene.canvas,ptrs=new Map();let grab=null;
@@ -407,13 +414,13 @@ ssc.rotateEventTypes=[];ssc.inertiaSpin=0;ssc.inertiaTranslate=0;ssc.inertiaZoom
     if(!g.mode){
       const scale=Math.log2(q.d/g.sq.d);let rot=(q.ang-g.sq.ang)*180/Math.PI;rot=((rot+540)%360)-180;
       const dya=p[0].y-g.start[0].y,dyb=p[1].y-g.start[1].y,dx=(p[0].x-g.start[0].x+p[1].x-g.start[1].x)/2,dy=(dya+dyb)/2;
-      if(Math.abs(scale)>0.1)g.mode='zoom';else if(Math.abs(rot)>7)g.mode='rotate';
+      if(Math.abs(scale)>SETTINGS.gestureZoomStart)g.mode='zoom';else if(Math.abs(rot)>SETTINGS.gestureRotateStart)g.mode='rotate';
       else if(dya*dyb>0&&Math.abs(dy)>10&&Math.abs(dy)>Math.abs(dx)*1.3&&Math.abs(scale)<0.06)g.mode=nearGround()?'look':'tilt';
       else return;
-      g.last=q;g.lastP=p;g.P=pick(q.c)||g.P;return}
+      g.last=g.sq;g.lastP=g.start}  // 判定までに動いた分も捨てずにこのまま反映する（指に遅れない）
     const P=g.P;
     if(g.mode==='zoom'&&P){const ratio=q.d/g.last.d;if(ratio<1)releaseFollow();
-      const off=Cesium.Cartesian3.subtract(camera.position,P,new Cesium.Cartesian3());Cesium.Cartesian3.multiplyByScalar(off,1/ratio,off);
+      const off=Cesium.Cartesian3.subtract(camera.position,P,new Cesium.Cartesian3());Cesium.Cartesian3.multiplyByScalar(off,Math.pow(ratio,-SETTINGS.pinchZoomSpeed),off);  // 感度：指の倍率のpinchZoomSpeed乗
       camera.setView({destination:Cesium.Cartesian3.add(P,off,new Cesium.Cartesian3()),orientation:{heading:camera.heading,pitch:camera.pitch,roll:0}})}
     else if(g.mode==='rotate'){let da=q.ang-g.last.ang;if(da>Math.PI)da-=2*Math.PI;if(da<-Math.PI)da+=2*Math.PI;da*=SETTINGS.rotateSpeed;
       if(P&&camera.pitch<-0.1)orbit(P,()=>camera.rotate(Cesium.Cartesian3.UNIT_Z,-da));else camera.setView({orientation:{heading:camera.heading-da,pitch:camera.pitch,roll:0}})}  // 空を見ているときはその場で回す
@@ -421,7 +428,7 @@ ssc.rotateEventTypes=[];ssc.inertiaSpin=0;ssc.inertiaTranslate=0;ssc.inertiaZoom
       camera.setView({orientation:{heading:camera.heading,pitch:np,roll:0}})}
     else if(g.mode==='tilt'&&P){const dy=q.c.y-g.last.c.y;
       orbit(P,()=>camera.rotateDown(dy*SETTINGS.tiltSpeed));if(camera.pitch>-0.05)orbit(P,()=>camera.rotateDown(-dy*SETTINGS.tiltSpeed))}  // 水平より上には回り込まない
-    g.last=q;g.lastP=p;scene.requestRender()},{passive:false});
+    g.last=q;g.lastP=p;scene.requestRender()},{passive:false});  // 間引かず、届いたタッチ1回ごとにカメラへ反映（描画は次のフレーム）
   const end=e=>{if(e.touches.length<2)g=null};
   el.addEventListener('touchend',end,{passive:true});el.addEventListener('touchcancel',end,{passive:true});
 })();
