@@ -114,8 +114,13 @@ const SETTINGS={
   // --- タッチ操作の感度（ここを変えるだけで調整できる）---
   rotateSpeed:2.25,  // 2本指でひねったときの回転の感度(1=指と同じ角度)。以前の1.5の1.5倍
   pinchZoomSpeed:1.5,// ピンチの拡大縮小の感度(1=指の開き具合と同じ倍率。1.5で指を2倍開くと約2.8倍寄る)
-  gestureZoomStart:0.05,  // 2本指の動きを「ピンチ」と判定し始める開き具合(log2。0.05≒3.5%)。小さいほど早く反応
-  gestureRotateStart:4,   // 2本指の動きを「回転」と判定し始める角度(度)。小さいほど早く反応
+  // 2本指のジェスチャーロック：指が動き始めて gestureLockPx だけ動いた時点で、ズーム・回転・傾きのどれか1つに決め、指を離すまで他の動きは無視する
+  gestureLockPx:10,       // 判定に使う指の移動量(px)。小さいほど早く決まる（小さすぎると誤判定しやすい）
+  gestureZoomWeight:1.0,  // 判定の重み：指の間隔の変化(px)に掛ける
+  gestureRotateWeight:1.0,// 判定の重み：ひねりで指が円周方向に動いた距離(px)に掛ける
+  gestureTiltWeight:1.0,  // 判定の重み：2本の指がそろって上下に動いた距離(px)に掛ける
+  gestureTiltParallel:1.2,// 傾きと見なす条件：上下の動きが左右の動きのこの倍以上
+  gestureGiveUpPx:60,     // ここまで動いてもどれとも決まらない（2本指で横に平行移動など）ときは、その操作を無視する
   inertiaSpin:0,     // 慣性(0〜1)。0=指を離したら即停止、大きいほど滑る(Cesium標準は0.9)
   inertiaTranslate:0,
   inertiaZoom:0,
@@ -411,13 +416,19 @@ ssc.rotateEventTypes=[];ssc.inertiaSpin=SETTINGS.inertiaSpin;ssc.inertiaTranslat
   el.addEventListener('touchmove',e=>{
     if(!g||e.touches.length!==2)return;e.preventDefault();
     const p=two(e.touches),q=geo(p);
-    if(!g.mode){
-      const scale=Math.log2(q.d/g.sq.d);let rot=(q.ang-g.sq.ang)*180/Math.PI;rot=((rot+540)%360)-180;
-      const dya=p[0].y-g.start[0].y,dyb=p[1].y-g.start[1].y,dx=(p[0].x-g.start[0].x+p[1].x-g.start[1].x)/2,dy=(dya+dyb)/2;
-      if(Math.abs(scale)>SETTINGS.gestureZoomStart)g.mode='zoom';else if(Math.abs(rot)>SETTINGS.gestureRotateStart)g.mode='rotate';
-      else if(dya*dyb>0&&Math.abs(dy)>10&&Math.abs(dy)>Math.abs(dx)*1.3&&Math.abs(scale)<0.06)g.mode=nearGround()?'look':'tilt';
-      else return;
-      g.last=g.sq;g.lastP=g.start}  // 判定までに動いた分も捨てずにこのまま反映する（指に遅れない）
+    if(!g.mode){  // ジェスチャーロック：最初の gestureLockPx の動きで1つに決める
+      const da=[p[0].x-g.start[0].x,p[0].y-g.start[0].y],db=[p[1].x-g.start[1].x,p[1].y-g.start[1].y],travel=Math.max(Math.hypot(...da),Math.hypot(...db));
+      if(travel<SETTINGS.gestureLockPx)return;
+      let rot=q.ang-g.sq.ang;if(rot>Math.PI)rot-=2*Math.PI;if(rot<-Math.PI)rot+=2*Math.PI;
+      const zoomPx=Math.abs(q.d-g.sq.d)*SETTINGS.gestureZoomWeight;                // 指の間隔の変化
+      const rotPx=Math.abs(rot)*g.sq.d/2*SETTINGS.gestureRotateWeight;              // ひねりで指が円周方向に動いた距離
+      const same=da[1]*db[1]>0,dy=(da[1]+db[1])/2,dx=(da[0]+db[0])/2;
+      const tiltPx=same&&Math.abs(dy)>=Math.abs(dx)*SETTINGS.gestureTiltParallel?Math.min(Math.abs(da[1]),Math.abs(db[1]))*SETTINGS.gestureTiltWeight:0;  // 2本がそろって上下
+      const best=Math.max(zoomPx,rotPx,tiltPx);
+      if(best<SETTINGS.gestureLockPx*0.5){if(travel>SETTINGS.gestureGiveUpPx)g.mode='none';return}  // まだはっきりしない
+      g.mode=best===zoomPx?'zoom':best===rotPx?'rotate':(nearGround()?'look':'tilt');
+      g.last=g.sq;g.lastP=g.start}  // 判定までに動いた分も、決まった操作としてそのまま反映する（指に遅れない）
+    if(g.mode==='none')return;
     const P=g.P;
     if(g.mode==='zoom'&&P){const ratio=q.d/g.last.d;if(ratio<1)releaseFollow();
       const off=Cesium.Cartesian3.subtract(camera.position,P,new Cesium.Cartesian3());Cesium.Cartesian3.multiplyByScalar(off,Math.pow(ratio,-SETTINGS.pinchZoomSpeed),off);  // 感度：指の倍率のpinchZoomSpeed乗
