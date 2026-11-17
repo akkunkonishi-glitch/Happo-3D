@@ -81,7 +81,7 @@ input:not([type=range]):not([type=checkbox]):not([type=color]):not([type=button]
   <div id="status">読み込み中…</div>
   <div><button id="top">真上から</button><button id="oblique">斜めから</button><button id="contour">等高線 ON</button><button id="slope">ゲレンデ向き</button></div>
   <div><button id="viewSave">現在の視点を初期位置にする</button><button id="viewCopy">初期視点をコピー</button></div>
-  <div id="courseRow"><label><input type="checkbox" id="courseOn" checked>コース</label> 透明度 <input type="range" id="courseAlpha" min="0.1" max="0.9" step="0.05" value="0.45"><div id="courseInfo">コース読み込み中…</div><div id="courseStatus"></div><button id="courseRetry" style="display:none">再取得</button></div>
+  <div id="courseRow"><label><input type="checkbox" id="courseOn" checked>コース</label> 透明度 <input type="range" id="courseAlpha" min="0.1" max="0.9" step="0.05" value="0.45"><div><label><input type="checkbox" id="snowOn" checked>雪の質感</label> 濃さ <input type="range" id="snowAlpha" min="0.2" max="1" step="0.05" value="0.75"></div><div id="courseInfo">コース読み込み中…</div><div id="courseStatus"></div><button id="courseRetry" style="display:none">再取得</button></div>
   <div id="obj3dRow"><label><input type="checkbox" id="liftsOn" checked>リフト3D</label> <label><input type="checkbox" id="bldOn" checked>建物（近づくと表示）</label><div id="obj3dInfo"></div><div id="obj3dStatus"></div><details id="bldDiag"><summary>建物の診断（取得→範囲判定→描画）</summary><div id="bldDiagBody">まだ読み込んでいません</div></details><button id="liftsExport">リフト書き出し</button><button id="bldExport">buildings書き出し</button><button id="obj3dRefetch">OSM再取得</button></div>
   <div><button id="newRope">新しいロープ</button><button id="draw">点を打つ</button><button id="undo">1点戻す</button></div>
   <div id="ropeList"></div>
@@ -132,6 +132,12 @@ const SETTINGS={
   resetHeight:20,    // 「ゲレンデ向き」ボタンでの地表からの高さ(m)。nullにすると今の高さのまま
   minimapZoom:15,    // ミニマップの既定の縮尺(ズーム。大きいほど拡大)
   minimapSize:200,   // ミニマップの大きさ(px)
+  snowColor:'#F4F8FC', // コースの雪の色（少し青みのある白）
+  snowAlpha:0.75,    // 雪の濃さ（不透明度）の初期値。パネルのスライダーで変更できる
+  snowNoiseMeters:6, // 雪面の細かい模様1枚の大きさ(m)。大きな模様はこの約7倍
+  snowSunHourJST:11, // 雪面の陰影に使う太陽の時刻（日本時間）。夜に開いても雪面が暗くならないよう固定
+  snowShadeMin:0.6,  // 一番暗い日陰の斜面の明るさ(0〜1)
+  snowShadeStrength:1.3,// 斜面の向きによる明暗の強さ（0で陰影なし）
   stickYawSpeed:60,  // 視点スティック：左右に回る速さ(度/秒、倒し量に関係なく一定)
   stickPitchSpeed:40 // 視点スティック：見上げ・見下ろしの速さ(度/秒)
 };
@@ -546,6 +552,62 @@ let courseAlpha=0.45;const courseMats=new Map();
 function matsFor(color){color=color||COURSE.fill;let m=courseMats.get(color);  // コースの色ごとの塗り・縁の材質（縁は塗りを濃くした色）
   if(!m){const c=Cesium.Color.fromCssColorString(color);m={base:c,fill:new Cesium.ColorMaterialProperty(c.withAlpha(courseAlpha)),edge:new Cesium.ColorMaterialProperty(new Cesium.Color(c.red*0.45,c.green*0.55,c.blue*0.6,Math.min(1,courseAlpha*1.6+0.2)))};courseMats.set(color,m)}
   return m}
+// ===== コースの雪の質感 =====
+// 全コースを1つのGroundPrimitiveにまとめ、Canvasで作ったノイズ模様＋少し青みのある白で地形に貼る。
+// 陰影：雪面の画素ごとに、描いた地形の深度から斜面の向き(法線)を求め、Cesiumの太陽光の向きとの角度で明暗を付ける。
+const snowState=(()=>{let v=null;try{v=JSON.parse(localStorage.getItem('happoSnow')||'null')}catch(e){}return {on:v?v.on!==false:true,alpha:v&&isFinite(v.alpha)?v.alpha:SETTINGS.snowAlpha}})();
+const snowLayer=(()=>{
+  // 継ぎ目なく並べられるノイズ（値ノイズを3段重ね）をCanvasで作る。R=細かい粒、G=大きなむら
+  function noiseCanvas(N){const cv=document.createElement('canvas');cv.width=cv.height=N;const ctx=cv.getContext('2d'),img=ctx.createImageData(N,N);
+    let seed=12345;const rnd=()=>(seed=(seed*16807)%2147483647)/2147483647;
+    const grid=g=>{const a=new Float32Array(g*g);for(let i=0;i<a.length;i++)a[i]=rnd();return a};
+    const layer=(g)=>{const a=grid(g);return (x,y)=>{const fx=x/N*g,fy=y/N*g,x0=Math.floor(fx),y0=Math.floor(fy),tx=fx-x0,ty=fy-y0,sx=tx*tx*(3-2*tx),sy=ty*ty*(3-2*ty),
+      v=(i,j)=>a[((j%g+g)%g)*g+((i%g+g)%g)];return (v(x0,y0)*(1-sx)+v(x0+1,y0)*sx)*(1-sy)+(v(x0,y0+1)*(1-sx)+v(x0+1,y0+1)*sx)*sy}};
+    const f1=layer(64),f2=layer(16),f3=layer(4);
+    for(let y=0;y<N;y++)for(let x=0;x<N;x++){const k=(y*N+x)*4,grain=f1(x,y)*0.6+rnd()*0.4,mott=f2(x,y)*0.6+f3(x,y)*0.4;
+      img.data[k]=grain*255;img.data[k+1]=mott*255;img.data[k+2]=128;img.data[k+3]=255}
+    ctx.putImageData(img,0,0);return cv}
+  const center=Cesium.Cartesian3.fromDegrees(137.815,36.695,1500),enu=Cesium.Matrix3.transpose(Cesium.Matrix4.getMatrix3(Cesium.Transforms.eastNorthUpToFixedFrame(center),new Cesium.Matrix3()),new Cesium.Matrix3());
+  const col=Cesium.Color.fromCssColorString(SETTINGS.snowColor);
+  let material=null,prim=null,next=null,timer=0,supported=null;
+  function makeMaterial(){return new Cesium.Material({translucent:true,fabric:{type:'HappoSnow',
+    uniforms:{image:noiseCanvas(256),color:col.withAlpha(snowState.alpha),camOff:new Cesium.Cartesian3(),enu:Cesium.Matrix3.toArray(enu),tile:SETTINGS.snowNoiseMeters,shadeMin:SETTINGS.snowShadeMin,shadeK:SETTINGS.snowShadeStrength,upWC:Cesium.Ellipsoid.WGS84.geodeticSurfaceNormal(center,new Cesium.Cartesian3())},
+    source:`czm_material czm_getMaterial(czm_materialInput materialInput){
+      czm_material m=czm_getDefaultMaterial(materialInput);
+      vec3 rel=czm_inverseViewRotation*(-materialInput.positionToEyeEC)+camOff;  // 雪面の位置（基準点からのメートル。精度を保つためカメラからの差で計算）
+      vec2 p=(enu*rel).xy;                                                    // 東・北方向の座標(m)
+      float g=texture(image,fract(p/tile)).r,mt=texture(image,fract(p/(tile*7.3)+0.37)).g;
+      vec3 nEC=normalize(materialInput.normalEC);                             // 斜面の向き：Cesiumが地形の深度（隣の画素）から求めた法線
+      if(dot(nEC,materialInput.positionToEyeEC)<0.0)nEC=-nEC;
+      float lit=clamp(dot(nEC,czm_lightDirectionEC),0.0,1.0);                   // この斜面への太陽光の当たり具合
+      float litFlat=clamp(dot(normalize(czm_viewRotation*upWC),czm_lightDirectionEC),0.0,1.0);  // 平らな雪面への当たり具合
+      float shade=clamp(1.0+shadeK*(lit-litFlat),shadeMin,1.08);              // 平らな面を白の基準にし、日の当たる斜面は明るく、日陰の斜面は暗く
+      m.diffuse=color.rgb*(0.88+0.12*g+0.08*(mt-0.5))*shade;                  // 細かい粒と大きなむら＋斜面の陰影
+      m.alpha=color.a;return m;}`}})}
+  function ok(){if(supported===null)supported=Cesium.GroundPrimitive.supportsMaterials(scene);return supported}
+  function build(){timer=0;const feats=(courseGeo.features||[]).filter(f=>f&&f.properties&&f.properties.kind==='course'&&f.geometry&&f.geometry.type==='Polygon');
+    if(next){scene.groundPrimitives.remove(next);next=null}
+    if(!feats.length){if(prim){scene.groundPrimitives.remove(prim);prim=null}scene.requestRender();return}
+    if(!material)material=ok()?makeMaterial():null;
+    const deg=c=>Cesium.Cartesian3.fromDegreesArray(c.flat()),vf=material?Cesium.MaterialAppearance.MaterialSupport.TEXTURED.vertexFormat:Cesium.PerInstanceColorAppearance.VERTEX_FORMAT;
+    const inst=[];for(const f of feats){const r=f.geometry.coordinates;try{inst.push(new Cesium.GeometryInstance({geometry:new Cesium.PolygonGeometry({polygonHierarchy:new Cesium.PolygonHierarchy(deg(r[0]),r.slice(1).map(h=>new Cesium.PolygonHierarchy(deg(h)))),vertexFormat:vf}),
+      attributes:material?undefined:{color:Cesium.ColorGeometryInstanceAttribute.fromColor(col.withAlpha(snowState.alpha))}}))}catch(e){}}
+    next=scene.groundPrimitives.add(new Cesium.GroundPrimitive({geometryInstances:inst,classificationType:Cesium.ClassificationType.TERRAIN,asynchronous:true,allowPicking:false,
+      appearance:material?new Cesium.MaterialAppearance({material,flat:true,translucent:true}):new Cesium.PerInstanceColorAppearance({flat:true,translucent:true})}));  // 陰影はマテリアル内で計算
+    scene.groundPrimitives.lowerToBottom(next);  // 雪は一番下：コースの縁の線・選択中の塗りが上に見えるように
+    next.show=visible();let n=0;const tick=()=>{if(!next)return;if(next.ready){if(prim)scene.groundPrimitives.remove(prim);prim=next;next=null;scene.requestRender();return}  // 出来上がってから入れ替える（ちらつかない）
+      if(++n<200){scene.requestRender();setTimeout(tick,100)}};tick()}
+  const visible=()=>snowState.on&&document.getElementById('courseOn').checked;
+  // カメラと基準点の差を毎フレーム渡す（模様の位置計算用）
+  scene.preRender.addEventListener(()=>{if(material&&prim&&prim.show)Cesium.Cartesian3.subtract(camera.positionWC,center,material.uniforms.camOff)});
+  return {
+    schedule(){if(timer)clearTimeout(timer);timer=setTimeout(build,250)},  // 編集が続く間はまとめて1回だけ作り直す
+    update(){for(const q of [prim,next])if(q)q.show=visible();if(material)material.uniforms.color=col.withAlpha(snowState.alpha);scene.requestRender()},
+    get supported(){return ok()}}
+})();
+// 雪面の陰影用：太陽の位置を日中に固定（時計は進めない）
+(()=>{const d=new Date(),y=d.getFullYear(),m=String(d.getMonth()+1).padStart(2,'0'),dd=String(d.getDate()).padStart(2,'0'),h=((SETTINGS.snowSunHourJST-9)+24)%24;
+  viewer.clock.currentTime=Cesium.JulianDate.fromIso8601(y+'-'+m+'-'+dd+'T'+String(h).padStart(2,'0')+':00:00Z');viewer.clock.shouldAnimate=false})();
 let courseGeo={type:'FeatureCollection',properties:{},features:[]};
 const featEnts=new Map();let editSel=null;
 const isCourse=ft=>ft.properties.kind==='course'&&ft.geometry.type==='Polygon';
@@ -553,18 +615,18 @@ const courseRing=ft=>ft.geometry.coordinates[0];
 function addCourseFeature(ft){
   const out=[],add=o=>{out.push(courseSrc.entities.add(o))},deg=c=>Cesium.Cartesian3.fromDegreesArray(c.flat());
   if(isCourse(ft)){const sel=ft===editSel,rings=ft.geometry.coordinates,m=matsFor(ft.properties.color);
-    add({polygon:{hierarchy:new Cesium.PolygonHierarchy(deg(rings[0]),rings.slice(1).map(h=>new Cesium.PolygonHierarchy(deg(h)))),material:sel?Cesium.Color.fromCssColorString('#ff9800').withAlpha(0.5):m.fill,classificationType:Cesium.ClassificationType.TERRAIN}});
+    if(sel||!snowState.on)add({polygon:{hierarchy:new Cesium.PolygonHierarchy(deg(rings[0]),rings.slice(1).map(h=>new Cesium.PolygonHierarchy(deg(h)))),material:sel?Cesium.Color.fromCssColorString('#ff9800').withAlpha(0.5):m.fill,classificationType:Cesium.ClassificationType.TERRAIN}});
     for(const r of rings)add({polyline:{positions:deg(r),width:sel?3.5:2,material:sel?Cesium.Color.fromCssColorString('#ff6d00'):m.edge,clampToGround:true}})}
   else if(ft.properties.kind==='lift'&&ft.geometry.coordinates.length>=2){const c=ft.geometry.coordinates,mid=c[Math.floor(c.length/2)];
     add({polyline:{positions:deg(c),width:3,material:new Cesium.PolylineOutlineMaterialProperty({color:Cesium.Color.WHITE,outlineColor:Cesium.Color.fromCssColorString('#333'),outlineWidth:1}),clampToGround:true}});
     if(ft.properties.name)add({position:Cesium.Cartesian3.fromDegrees(mid[0],mid[1]),label:{text:ft.properties.name,font:'bold 13px sans-serif',fillColor:Cesium.Color.WHITE,outlineColor:Cesium.Color.BLACK,outlineWidth:3,style:Cesium.LabelStyle.FILL_AND_OUTLINE,heightReference:Cesium.HeightReference.CLAMP_TO_GROUND,pixelOffset:new Cesium.Cartesian2(0,-14),disableDepthTestDistance:Number.POSITIVE_INFINITY,distanceDisplayCondition:new Cesium.DistanceDisplayCondition(0,9000)}})}
   featEnts.set(ft,out)}
-function removeCourseFeature(ft){for(const e of featEnts.get(ft)||[])courseSrc.entities.remove(e);featEnts.delete(ft)}
-function redrawFeature(ft){if(!ft)return;removeCourseFeature(ft);addCourseFeature(ft);scene.requestRender();mini.request()}
+function removeCourseFeature(ft){for(const e of featEnts.get(ft)||[])courseSrc.entities.remove(e);featEnts.delete(ft);snowLayer.schedule()}
+function redrawFeature(ft){if(!ft)return;removeCourseFeature(ft);addCourseFeature(ft);snowLayer.schedule();scene.requestRender();mini.request()}
 function drawCourses(){
   courseSrc.entities.suspendEvents();courseSrc.entities.removeAll();featEnts.clear();
   for(const ft of courseGeo.features)addCourseFeature(ft);
-  courseSrc.entities.resumeEvents();courseSrc.show=document.getElementById('courseOn').checked;scene.requestRender();mini.request()}
+  courseSrc.entities.resumeEvents();courseSrc.show=document.getElementById('courseOn').checked;snowLayer.schedule();scene.requestRender();mini.request()}
 const courseCounts=()=>{const f=courseGeo.features;return 'コース'+f.filter(isCourse).length+'・リフト'+f.filter(x=>x.properties.kind==='lift').length};
 const lsGet=k=>{try{const v=localStorage.getItem(k);return v?JSON.parse(v):null}catch(e){return null}};
 const lsSet=(k,v)=>{try{localStorage.setItem(k,JSON.stringify(v));return true}catch(e){return false}};
@@ -719,7 +781,12 @@ async function loadCourses(){
   catch(e){courseGeo={type:'FeatureCollection',properties:{},features:[]};drawCourses();
     info.textContent='コースを表示できません：courses.geojson が無く、OpenStreetMapからも取得できませんでした。理由は下の一覧を見てください';retry.style.display=''}}
 document.getElementById('courseRetry').onclick=()=>{try{localStorage.removeItem(COURSE.keys.auto)}catch(e){}loadCourses()};
-document.getElementById('courseOn').onchange=e=>{courseSrc.show=e.target.checked;scene.requestRender();mini.request()};
+document.getElementById('courseOn').onchange=e=>{courseSrc.show=e.target.checked;snowLayer.update();scene.requestRender();mini.request()};
+// 雪の質感：オンオフと濃さ（端末に覚えておく）
+{const on=document.getElementById('snowOn'),al=document.getElementById('snowAlpha'),keep=()=>{try{localStorage.setItem('happoSnow',JSON.stringify(snowState))}catch(e){}};
+  on.checked=snowState.on;al.value=snowState.alpha;
+  on.onchange=()=>{snowState.on=on.checked;keep();drawCourses();snowLayer.update()};  // オフにすると以前の色付きの塗りに戻る
+  al.oninput=()=>{snowState.alpha=+al.value;keep();snowLayer.update()}}
 document.getElementById('courseAlpha').oninput=e=>{courseAlpha=+e.target.value;for(const m of courseMats.values()){const c=m.base;m.fill.color=c.withAlpha(courseAlpha);m.edge.color=new Cesium.Color(c.red*0.45,c.green*0.55,c.blue*0.6,Math.min(1,courseAlpha*1.6+0.2))}scene.requestRender()};
 // ミニマップにもコース（各色）・リフト(白)を表示（選択中はオレンジ）
 mini.hooks.draw=(ctx,proj)=>{if(!courseSrc.show)return;
