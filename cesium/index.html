@@ -41,6 +41,7 @@ input:not([type=range]):not([type=checkbox]):not([type=color]):not([type=button]
 #courseStatus .ng{color:#c62828}#courseStatus .ok{color:#2e7d32}
 #editRow{margin-top:4px;padding:5px;border-radius:8px;background:#fff1e0;font-size:12px}
 #editRow .ei{margin:2px 0;color:#7a3d00}
+#forestRow{font-size:12px;margin-top:4px;padding-top:4px;border-top:1px solid #ddd}#forestRow input[type=range]{width:90px;vertical-align:middle;touch-action:pan-x}#forestRow .fs{color:#444}#fInfo{font-size:11px;color:#555}#forestRow .fp button.on{background:#ff6d00;color:#fff}
 #recoverBox{display:none;position:fixed;left:50%;top:50%;transform:translate(-50%,-50%);z-index:50;width:min(420px,calc(100vw - 32px));max-height:80dvh;overflow:auto;background:#fff;border-radius:10px;box-shadow:0 4px 24px rgba(0,0,0,.35);padding:12px;font-size:13px;-webkit-user-select:none;user-select:none}
 #recoverBox .rt{font-weight:bold;font-size:15px;margin-bottom:4px}#recoverBox .rn{color:#555;margin:4px 0}#recoverBox .ri{border-top:1px solid #eee;padding:6px 0}#recoverBox .ri button{display:block;margin-top:4px}#recoverBox button{padding:6px 10px;font-size:13px}
 #courseMenu{position:absolute;z-index:20;display:none;background:#fffffff2;border-radius:10px;box-shadow:0 3px 14px #0005;padding:6px;touch-action:none}
@@ -138,6 +139,13 @@ const SETTINGS={
   snowSunHourJST:11, // 雪面の陰影に使う太陽の時刻（日本時間）。夜に開いても雪面が暗くならないよう固定
   snowShadeMin:0.6,  // 一番暗い日陰の斜面の明るさ(0〜1)
   snowShadeStrength:1.3,// 斜面の向きによる明暗の強さ（0で陰影なし）
+  forestZoom:16,     // 林の判定に使う航空写真のズーム（16＝約1.9m/画素、管理区域で約160枚）
+  forestDown:2,      // 判定結果の解像度＝写真の画素をこの数ずつまとめる（2で約3.8m）
+  forestWindow:3,    // 暗さ・模様を測る範囲（まとめた画素の半径。3で周囲約27m）
+  forestDark:0.62,   // 林と判定する暗さのしきい値の初期値(0〜1、大きいほど暗い所だけ林)。パネルで変更可
+  forestTexture:0.18,// 林と判定する模様の細かさ（明るさのばらつき）のしきい値の初期値(0〜1)。パネルで変更可
+  forestAlpha:0.5,   // 林の上に重ねる白の濃さの初期値（雪をかぶった木の見え方）
+  forestBrush:15,    // 編集モードの塗り直しの筆の半径(m)の初期値
   stickYawSpeed:60,  // 視点スティック：左右に回る速さ(度/秒、倒し量に関係なく一定)
   stickPitchSpeed:40 // 視点スティック：見上げ・見下ろしの速さ(度/秒)
 };
@@ -398,6 +406,7 @@ ssc.rotateEventTypes=[];ssc.inertiaSpin=SETTINGS.inertiaSpin;ssc.inertiaTranslat
   const el=scene.canvas,ptrs=new Map();let grab=null;
   const local=e=>{const r=el.getBoundingClientRect();return {x:e.clientX-r.left,y:e.clientY-r.top}};
   el.addEventListener('pointerdown',e=>{ptrs.set(e.pointerId,1);
+    if(EDIT&&window.__forestPainting&&window.__forestPainting()){grab=null;return}
     if(EDIT&&window.__editHit){const r=el.getBoundingClientRect();if(window.__editHit(e.clientX-r.left,e.clientY-r.top)){grab=null;return}}  // 編集モードで頂点をつかんだときは頂点操作に回す
     if(ptrs.size===1&&(e.pointerType!=='mouse'||e.button===0)&&!e.ctrlKey&&!e.shiftKey){const p=local(e),ray=camera.getPickRay(new Cesium.Cartesian2(p.x,p.y)),P0=ray&&globe.pick(ray,scene);
       grab={P0,normal:P0?Cesium.Ellipsoid.WGS84.geodeticSurfaceNormal(P0,new Cesium.Cartesian3()):null,last:p}}else grab=null});
@@ -569,9 +578,9 @@ const snowLayer=(()=>{
     ctx.putImageData(img,0,0);return cv}
   const center=Cesium.Cartesian3.fromDegrees(137.815,36.695,1500),enu=Cesium.Matrix3.transpose(Cesium.Matrix4.getMatrix3(Cesium.Transforms.eastNorthUpToFixedFrame(center),new Cesium.Matrix3()),new Cesium.Matrix3());
   const col=Cesium.Color.fromCssColorString(SETTINGS.snowColor);
-  let material=null,prim=null,next=null,timer=0,supported=null;
+  let material=null,prim=null,next=null,timer=0,supported=null,noiseCv=null;const noise=()=>noiseCv||(noiseCv=noiseCanvas(256));
   function makeMaterial(){return new Cesium.Material({translucent:true,fabric:{type:'HappoSnow',
-    uniforms:{image:noiseCanvas(256),color:col.withAlpha(snowState.alpha),camOff:new Cesium.Cartesian3(),enu:Cesium.Matrix3.toArray(enu),tile:SETTINGS.snowNoiseMeters,shadeMin:SETTINGS.snowShadeMin,shadeK:SETTINGS.snowShadeStrength,upWC:Cesium.Ellipsoid.WGS84.geodeticSurfaceNormal(center,new Cesium.Cartesian3())},
+    uniforms:{image:noise(),color:col.withAlpha(snowState.alpha),camOff:new Cesium.Cartesian3(),enu:Cesium.Matrix3.toArray(enu),tile:SETTINGS.snowNoiseMeters,shadeMin:SETTINGS.snowShadeMin,shadeK:SETTINGS.snowShadeStrength,upWC:Cesium.Ellipsoid.WGS84.geodeticSurfaceNormal(center,new Cesium.Cartesian3())},
     source:`czm_material czm_getMaterial(czm_materialInput materialInput){
       czm_material m=czm_getDefaultMaterial(materialInput);
       vec3 rel=czm_inverseViewRotation*(-materialInput.positionToEyeEC)+camOff;  // 雪面の位置（基準点からのメートル。精度を保つためカメラからの差で計算）
@@ -595,15 +604,17 @@ const snowLayer=(()=>{
     next=scene.groundPrimitives.add(new Cesium.GroundPrimitive({geometryInstances:inst,classificationType:Cesium.ClassificationType.TERRAIN,asynchronous:true,allowPicking:false,
       appearance:material?new Cesium.MaterialAppearance({material,flat:true,translucent:true}):new Cesium.PerInstanceColorAppearance({flat:true,translucent:true})}));  // 陰影はマテリアル内で計算
     scene.groundPrimitives.lowerToBottom(next);  // 雪は一番下：コースの縁の線・選択中の塗りが上に見えるように
-    next.show=visible();let n=0;const tick=()=>{if(!next)return;if(next.ready){if(prim)scene.groundPrimitives.remove(prim);prim=next;next=null;scene.requestRender();return}  // 出来上がってから入れ替える（ちらつかない）
+    next.show=visible();let n=0;const tick=()=>{if(!next)return;if(next.ready){if(prim)scene.groundPrimitives.remove(prim);prim=next;next=null;if(api.onSwap)api.onSwap();scene.requestRender();return}  // 出来上がってから入れ替える（ちらつかない）
       if(++n<200){scene.requestRender();setTimeout(tick,100)}};tick()}
   const visible=()=>snowState.on&&document.getElementById('courseOn').checked;
   // カメラと基準点の差を毎フレーム渡す（模様の位置計算用）
   scene.preRender.addEventListener(()=>{if(material&&prim&&prim.show)Cesium.Cartesian3.subtract(camera.positionWC,center,material.uniforms.camOff)});
-  return {
-    schedule(){if(timer)clearTimeout(timer);timer=setTimeout(build,250)},  // 編集が続く間はまとめて1回だけ作り直す
+  const api={
+    shared:{center,enuArr:Cesium.Matrix3.toArray(enu),upWC:Cesium.Ellipsoid.WGS84.geodeticSurfaceNormal(center,new Cesium.Cartesian3()),noise,col},
+    schedule(){if(timer)clearTimeout(timer);timer=setTimeout(build,250);if(api.onCourses)api.onCourses()},  // 編集が続く間はまとめて1回だけ作り直す
     update(){for(const q of [prim,next])if(q)q.show=visible();if(material)material.uniforms.color=col.withAlpha(snowState.alpha);scene.requestRender()},
-    get supported(){return ok()}}
+    get supported(){return ok()}};
+  return api;
 })();
 // 雪面の陰影用：太陽の位置を日中に固定（時計は進めない）
 (()=>{const d=new Date(),y=d.getFullYear(),m=String(d.getMonth()+1).padStart(2,'0'),dd=String(d.getDate()).padStart(2,'0'),h=((SETTINGS.snowSunHourJST-9)+24)%24;
@@ -1400,7 +1411,157 @@ document.getElementById('obj3dRefetch').onclick=async()=>{if(!confirm('リフト
 showObj3dInfo();
 // 編集モード：駅舎の箱をドラッグすると地表に沿って動く（ワイヤーも追従）。位置は端末に保存し、lifts3d書き出しに含まれる
 if(EDIT){obj3dLog.add('編集モード：リフトをタップで選択。起点・終点（駅舎の箱）をドラッグで移動、線をドラッグでリフトごと移動');obj3dLog.add('編集モード中は軽くするため支柱を表示しません（選択中のリフトだけ表示）。建物は初期は非表示で、チェックすると表示します')}
-(async()=>{await loadObj3d('lifts');await loadObj3d('buildings')})();  // loadObj3d は失敗しても例外を投げないので、リフトが失敗しても建物は読む
+(async()=>{await loadObj3d('lifts');await loadObj3d('buildings')})();
+// ===== 林と開けた斜面の描き分け =====
+// 管理区域の航空写真をブラウザで読み、画素ごとの「暗さ」と「模様の細かさ（周囲との明るさのばらつき）」を測ってマスクを作る。
+// 林かどうかのしきい値はシェーダーで比べるので、スライダーを動かすとすぐ反映される（測り直し不要）。
+// 開けた場所＝コースと同じ雪表現、林＝白を半透明に重ねて航空写真を明るく白っぽくし、雪をかぶった木に見せる。コースの中はコースの雪レイヤーに任せる。
+// 保存：端末(IndexedDB)に自動保存。「PNG書き出し」で forest-mask.png（R=暗さ・G=模様・B=塗り直し 0/128林/255開けた）を保存し、cesium/data/ に置くと次回それを読む。
+const idb={open(){return new Promise((res,rej)=>{const r=indexedDB.open('happo3d',1);r.onupgradeneeded=()=>r.result.createObjectStore('kv');r.onsuccess=()=>res(r.result);r.onerror=()=>rej(r.error)})},
+  async get(k){const db=await this.open();return new Promise((res,rej)=>{const q=db.transaction('kv').objectStore('kv').get(k);q.onsuccess=()=>res(q.result);q.onerror=()=>rej(q.error)})},
+  async set(k,v){const db=await this.open();return new Promise((res,rej)=>{const t=db.transaction('kv','readwrite');t.objectStore('kv').put(v,k);t.oncomplete=()=>res(true);t.onerror=()=>rej(t.error)})}};
+function saveBlobFile(blob,name){const file=new File([blob],name,{type:blob.type||'application/octet-stream'});
+  try{if(navigator.canShare&&navigator.share&&navigator.canShare({files:[file]}))return navigator.share({files:[file],title:name}).then(()=>'shared',e=>e&&e.name==='AbortError'?'cancel':dl())}catch(e){}
+  return Promise.resolve(dl());
+  function dl(){const a=document.createElement('a');a.href=URL.createObjectURL(file);a.download=name;document.body.appendChild(a);a.click();setTimeout(()=>{URL.revokeObjectURL(a.href);a.remove()},5000);return 'download'}}
+const forest=(()=>{
+  const S=SETTINGS,Z=S.forestZoom,F=S.forestDown,N=1<<Z;
+  const lon2x=lon=>(lon+180)/360*N,lat2y=lat=>{const r=lat*Math.PI/180;return (1-Math.log(Math.tan(r)+1/Math.cos(r))/Math.PI)/2*N};
+  const xs=KML_RING.map(q=>q[0]),ys=KML_RING.map(q=>q[1]),mg=0.001;
+  const x0=Math.floor(lon2x(Math.min(...xs)-mg)),x1=Math.floor(lon2x(Math.max(...xs)+mg)),y0=Math.floor(lat2y(Math.max(...ys)+mg)),y1=Math.floor(lat2y(Math.min(...ys)-mg));
+  const nx=x1-x0+1,ny=y1-y0+1,W=nx*256/F,H=ny*256/F;  // マスクの大きさ（画素）
+  const toPx=(lon,lat)=>[(lon2x(lon)-x0)*256/F,(lat2y(lat)-y0)*256/F];
+  const mPerPx=156543.03*Math.cos(36.7*Math.PI/180)/N*F;
+  const st=(()=>{let v=null;try{v=JSON.parse(localStorage.getItem('happoForest')||'null')}catch(e){}v=v||{};return {on:v.on!==false,dark:isFinite(v.dark)?v.dark:S.forestDark,tex:isFinite(v.tex)?v.tex:S.forestTexture,alpha:isFinite(v.alpha)?v.alpha:S.forestAlpha,brush:isFinite(v.brush)?v.brush:S.forestBrush}})();
+  const keep=()=>{try{localStorage.setItem('happoForest',JSON.stringify(st))}catch(e){}};
+  let data=null,material=null,prim=null,tex={},paintMode='',saveT=0,src='';
+  // --- パネル ---
+  const row=document.createElement('div');row.id='forestRow';
+  row.innerHTML='<div><label><input type="checkbox" id="fOn">林と開けた斜面を描き分け</label></div>'+
+    '<div class="fs">林の判定・暗さ <input type="range" id="fDark" min="0.3" max="0.9" step="0.01"> <span id="fDarkV"></span></div>'+
+    '<div class="fs">林の判定・模様 <input type="range" id="fTex" min="0" max="0.6" step="0.01"> <span id="fTexV"></span></div>'+
+    '<div class="fs">林の白さ <input type="range" id="fAlpha" min="0" max="0.9" step="0.05"></div>'+
+    '<div id="fInfo">林の判定：未読み込み</div>'+
+    '<div><button id="fRun">航空写真から判定し直す</button><button id="fExport">判定結果をPNG書き出し</button></div>'+
+    (EDIT?'<div class="fp">塗り直し：<button data-m="forest">林にする</button><button data-m="open">開けた場所にする</button><button data-m="erase">塗りを消す</button><button data-m="">やめる</button> 筆 <input type="range" id="fBrush" min="5" max="60" step="5">m</div>':'');
+  document.getElementById('courseRow').after(row);
+  const $f=id=>document.getElementById(id),info=t=>{$f('fInfo').textContent=t};
+  $f('fOn').checked=st.on;$f('fDark').value=st.dark;$f('fTex').value=st.tex;$f('fAlpha').value=st.alpha;if(EDIT)$f('fBrush').value=st.brush;
+  const showV=()=>{$f('fDarkV').textContent=Math.round(st.dark*100);$f('fTexV').textContent=Math.round(st.tex*100)};showV();
+  const setU=()=>{if(material){const u=material.uniforms;u.tDark=st.dark;u.tTex=st.tex;u.fAlpha=st.alpha;u.snowA=snowState.alpha}if(prim)prim.show=st.on&&!!data;scene.requestRender()};
+  $f('fOn').onchange=()=>{st.on=$f('fOn').checked;keep();if(st.on&&!data)load(true);setU()};
+  $f('fDark').oninput=()=>{st.dark=+$f('fDark').value;keep();showV();setU()};
+  $f('fTex').oninput=()=>{st.tex=+$f('fTex').value;keep();showV();setU()};
+  $f('fAlpha').oninput=()=>{st.alpha=+$f('fAlpha').value;keep();setU()};
+  document.getElementById('snowAlpha').addEventListener('input',setU);
+  // --- 航空写真から判定 ---
+  async function classify(){
+    const cv=document.createElement('canvas');cv.width=nx*256;cv.height=ny*256;const ctx=cv.getContext('2d');let done=0,fail=0;const total=nx*ny;
+    const jobs=[];for(let ty=0;ty<ny;ty++)for(let tx=0;tx<nx;tx++)jobs.push([tx,ty]);
+    const load1=([tx,ty])=>new Promise(res=>{const im=new Image();im.crossOrigin='anonymous';
+      im.onload=()=>{ctx.drawImage(im,tx*256,ty*256);done++;info('林の判定：航空写真を読み込み中 '+done+'/'+total);res()};
+      im.onerror=()=>{fail++;done++;res()};im.src='https://cyberjapandata.gsi.go.jp/xyz/seamlessphoto/'+Z+'/'+(x0+tx)+'/'+(y0+ty)+'.jpg'});
+    let i=0;await Promise.all(Array.from({length:8},async()=>{while(i<jobs.length)await load1(jobs[i++])}));
+    if(fail===total)throw new Error('航空写真を1枚も読めませんでした（通信を確認してください）');
+    info('林の判定：計算中…');await new Promise(r=>setTimeout(r,30));
+    let img;try{img=ctx.getImageData(0,0,cv.width,cv.height).data}catch(e){throw new Error('航空写真の画素を読めません（CORS）')}
+    const CW=cv.width,L=new Float32Array(W*H),Q=new Float32Array(W*H);  // まとめた画素ごとの明るさの平均と2乗平均（元の細かいざらつきも残す）
+    for(let y=0;y<H;y++)for(let x=0;x<W;x++){let s=0,s2=0;for(let j=0;j<F;j++)for(let k=0;k<F;k++){const o=((y*F+j)*CW+(x*F+k))*4,v=img[o]*0.3+img[o+1]*0.59+img[o+2]*0.11;s+=v;s2+=v*v}L[y*W+x]=s/(F*F);Q[y*W+x]=s2/(F*F)}
+    const I=new Float64Array((W+1)*(H+1)),I2=new Float64Array((W+1)*(H+1));  // 積分画像で周囲の平均・ばらつきを速く求める
+    for(let y=0;y<H;y++){let a=0,b=0;for(let x=0;x<W;x++){const v=L[y*W+x];a+=v;b+=Q[y*W+x];I[(y+1)*(W+1)+x+1]=I[y*(W+1)+x+1]+a;I2[(y+1)*(W+1)+x+1]=I2[y*(W+1)+x+1]+b}}
+    const R=S.forestWindow,dark=new Uint8Array(W*H),tx_=new Uint8Array(W*H);
+    for(let y=0;y<H;y++){const ya=Math.max(0,y-R),yb=Math.min(H,y+R+1);for(let x=0;x<W;x++){const xa=Math.max(0,x-R),xb=Math.min(W,x+R+1),n=(yb-ya)*(xb-xa),
+      s=I[yb*(W+1)+xb]-I[ya*(W+1)+xb]-I[yb*(W+1)+xa]+I[ya*(W+1)+xa],s2=I2[yb*(W+1)+xb]-I2[ya*(W+1)+xb]-I2[yb*(W+1)+xa]+I2[ya*(W+1)+xa],m=s/n,sd=Math.sqrt(Math.max(0,s2/n-m*m));
+      dark[y*W+x]=Math.max(0,Math.min(255,255-m));tx_[y*W+x]=Math.max(0,Math.min(255,sd*4))}}
+    return {dark,tex:tx_,paint:new Uint8Array(W*H),failTiles:fail}}
+  // --- テクスチャ ---
+  const sampler=()=>new Cesium.Sampler({wrapS:Cesium.TextureWrap.CLAMP_TO_EDGE,wrapT:Cesium.TextureWrap.CLAMP_TO_EDGE,minificationFilter:Cesium.TextureMinificationFilter.LINEAR,magnificationFilter:Cesium.TextureMagnificationFilter.LINEAR});
+  const mkTex=arr=>new Cesium.Texture({context:scene.context,width:W,height:H,pixelFormat:Cesium.PixelFormat.RGBA,pixelDatatype:Cesium.PixelDatatype.UNSIGNED_BYTE,flipY:false,sampler:sampler(),source:{width:W,height:H,arrayBufferView:arr}});
+  function autoRGBA(){const a=new Uint8Array(W*H*4);for(let k=0;k<W*H;k++){a[k*4]=data.dark[k];a[k*4+1]=data.tex[k];a[k*4+3]=255}return a}
+  function paintRGBA(x,y,w,h){const a=new Uint8Array(w*h*4);for(let j=0;j<h;j++)for(let i=0;i<w;i++){const c=data.paint[(y+j)*W+x+i],o=(j*w+i)*4;a[o]=c===2?255:0;a[o+1]=c===1?255:0;a[o+3]=255}return a}
+  function courseRGBA(){const cv=document.createElement('canvas');cv.width=W;cv.height=H;const c=cv.getContext('2d');c.fillStyle='#fff';
+    for(const f of courseGeo.features||[]){if(!f||!f.properties||f.properties.kind!=='course'||!f.geometry||f.geometry.type!=='Polygon')continue;c.beginPath();
+      for(const r of f.geometry.coordinates){r.forEach((q,i)=>{const [px,py]=toPx(q[0],q[1]);i?c.lineTo(px,py):c.moveTo(px,py)});c.closePath()}c.fill('evenodd')}
+    const d=c.getImageData(0,0,W,H).data,a=new Uint8Array(W*H*4);for(let k=0;k<W*H;k++){a[k*4]=d[k*4];a[k*4+3]=255}return a}
+  // --- 描画（管理区域全体を1つのPrimitive）---
+  function uvMap(){const sh=snowLayer.shared,frame=Cesium.Transforms.eastNorthUpToFixedFrame(sh.center),uvOf=(e,n)=>{const p=Cesium.Matrix4.multiplyByPoint(frame,new Cesium.Cartesian3(e,n,0),new Cesium.Cartesian3()),c=Cesium.Cartographic.fromCartesian(p),[px,py]=toPx(Cesium.Math.toDegrees(c.longitude),Cesium.Math.toDegrees(c.latitude));return [px/W,py/H]};
+    const o=uvOf(0,0),e=uvOf(1000,0),n=uvOf(0,1000);return {uvO:new Cesium.Cartesian2(o[0],o[1]),uvM:new Cesium.Cartesian4((e[0]-o[0])/1000,(e[1]-o[1])/1000,(n[0]-o[0])/1000,(n[1]-o[1])/1000)}}
+  const ph=()=>{const c=document.createElement('canvas');c.width=c.height=1;return c};  // Textureの仮置き
+  function build(){if(prim){scene.groundPrimitives.remove(prim);prim=null}if(!data)return;
+    for(const k of ['auto','paint','course'])if(tex[k]&&!tex[k].isDestroyed())tex[k].destroy();
+    tex.auto=mkTex(autoRGBA());tex.paint=mkTex(paintRGBA(0,0,W,H));tex.course=mkTex(courseRGBA());
+    const sh=snowLayer.shared,m=uvMap();
+    material=new Cesium.Material({translucent:true,fabric:{type:'HappoForest',
+      uniforms:{autoTex:ph(),paintTex:ph(),courseTex:ph(),image:sh.noise(),uvO:m.uvO,uvM:m.uvM,tDark:st.dark,tTex:st.tex,fAlpha:st.alpha,snowA:snowState.alpha,
+        snowCol:Cesium.Color.clone(sh.col),camOff:new Cesium.Cartesian3(),enu:sh.enuArr,tile:S.snowNoiseMeters,shadeMin:S.snowShadeMin,shadeK:S.snowShadeStrength,upWC:sh.upWC},
+      source:`czm_material czm_getMaterial(czm_materialInput materialInput){
+        czm_material m=czm_getDefaultMaterial(materialInput);
+        vec3 rel=czm_inverseViewRotation*(-materialInput.positionToEyeEC)+camOff;vec2 p=(enu*rel).xy;   // 東・北方向の座標(m)
+        vec2 uv=uvO+vec2(uvM.x*p.x+uvM.z*p.y,uvM.y*p.x+uvM.w*p.y);                                  // マスク上の位置
+        vec4 a=texture(autoTex,uv),e=texture(paintTex,uv);float crs=texture(courseTex,uv).r;
+        float f=smoothstep(tDark-0.03,tDark+0.03,a.r)*smoothstep(tTex-0.03,tTex+0.03,a.g);         // 暗くて模様が細かい＝林
+        f=mix(f,1.0,e.g);f=mix(f,0.0,e.r);                                                          // 塗り直しを優先
+        float g=texture(image,fract(p/tile)).r,mt=texture(image,fract(p/(tile*7.3)+0.37)).g,cl=texture(image,fract(p/(tile*2.1)+0.71)).r;
+        vec3 nEC=normalize(materialInput.normalEC);if(dot(nEC,materialInput.positionToEyeEC)<0.0)nEC=-nEC;
+        float lit=clamp(dot(nEC,czm_lightDirectionEC),0.0,1.0),litFlat=clamp(dot(normalize(czm_viewRotation*upWC),czm_lightDirectionEC),0.0,1.0);
+        float shade=clamp(1.0+shadeK*(lit-litFlat),shadeMin,1.08);
+        vec3 openC=snowCol.rgb*(0.88+0.12*g+0.08*(mt-0.5))*shade;                                  // 開けた場所：コースと同じ雪
+        vec3 forestC=vec3(0.97,0.98,1.0)*(0.84+0.22*cl)*shade;                                       // 林：枝に積もった雪のまだら
+        float forestA=fAlpha*(0.65+0.7*cl);
+        m.diffuse=mix(openC,forestC,f);m.alpha=mix(snowA,forestA,f)*(1.0-crs);                       // コースの中はコースの雪に任せる
+        if(uv.x<0.0||uv.y<0.0||uv.x>1.0||uv.y>1.0)m.alpha=0.0;
+        return m;}`}});
+    material.uniforms.autoTex=tex.auto;material.uniforms.paintTex=tex.paint;material.uniforms.courseTex=tex.course;  // 作成後にTextureへ差し替える（作成時はCanvasでないと型が判定されない）
+    const deg=Cesium.Cartesian3.fromDegreesArray(KML_RING.flat());
+    prim=scene.groundPrimitives.add(new Cesium.GroundPrimitive({geometryInstances:new Cesium.GeometryInstance({geometry:new Cesium.PolygonGeometry({polygonHierarchy:new Cesium.PolygonHierarchy(deg),vertexFormat:Cesium.MaterialAppearance.MaterialSupport.TEXTURED.vertexFormat})}),
+      classificationType:Cesium.ClassificationType.TERRAIN,asynchronous:true,allowPicking:false,appearance:new Cesium.MaterialAppearance({material,flat:true,translucent:true})}));
+    scene.groundPrimitives.lowerToBottom(prim);setU();
+    let n=0;const tick=()=>{if(!prim)return;if(prim.ready){scene.requestRender();return}if(++n<200){scene.requestRender();setTimeout(tick,100)}};tick()}
+  scene.preRender.addEventListener(()=>{if(material&&prim&&prim.show)Cesium.Cartesian3.subtract(camera.positionWC,snowLayer.shared.center,material.uniforms.camOff)});
+  snowLayer.onSwap=()=>{if(prim)scene.groundPrimitives.lowerToBottom(prim)};  // 林のレイヤーはコースの雪より下
+  let cT=0;snowLayer.onCourses=()=>{if(!data||!tex.course)return;clearTimeout(cT);cT=setTimeout(()=>{if(tex.course&&!tex.course.isDestroyed()){tex.course.copyFrom({source:{width:W,height:H,arrayBufferView:courseRGBA()}});scene.requestRender()}},400)};
+  // --- 保存・読み込み ---
+  const valid=d=>d&&d.w===W&&d.h===H&&d.z===Z&&d.x0===x0&&d.y0===y0&&d.dark&&d.dark.length===W*H;
+  async function saveLocal(){try{await idb.set('forestMask',{z:Z,x0,y0,w:W,h:H,dark:data.dark,tex:data.tex,paint:data.paint,saved:new Date().toISOString()});return true}catch(e){return false}}
+  async function fromPng(url){const r=await fetch(url,{cache:'no-cache'});if(!r.ok)return null;const bmp=await createImageBitmap(await r.blob());if(bmp.width!==W||bmp.height!==H)throw new Error('大きさが合わない（'+bmp.width+'×'+bmp.height+'、必要 '+W+'×'+H+'）');
+    const cv=document.createElement('canvas');cv.width=W;cv.height=H;const c=cv.getContext('2d');c.drawImage(bmp,0,0);const d=c.getImageData(0,0,W,H).data,dark=new Uint8Array(W*H),t=new Uint8Array(W*H),p=new Uint8Array(W*H);
+    for(let k=0;k<W*H;k++){dark[k]=d[k*4];t[k]=d[k*4+1];const b=d[k*4+2];p[k]=b>192?2:b>64?1:0}return {dark,tex:t,paint:p}}
+  async function load(allowRun){
+    try{const cands=EDIT?['device','file']:['file','device'];
+      for(const c of cands){
+        if(c==='device'){const d=await idb.get('forestMask').catch(()=>null);if(valid(d)){data={dark:d.dark,tex:d.tex,paint:d.paint};src='端末に保存した判定結果';break}}
+        else{try{const d=await fromPng('data/forest-mask.png');if(d){data=d;src='forest-mask.png';break}}catch(e){info('林の判定：forest-mask.png を使えません（'+e.message+'）')}}}
+      if(!data&&allowRun){await run();return}
+      if(data){build();info('林の判定：'+src+'（'+W+'×'+H+'画素・約'+mPerPx.toFixed(1)+'m）')}}
+    catch(e){info('✗ 林の判定：'+e.message)}}
+  async function run(){try{const d=await classify();data=d;src='航空写真から判定';await saveLocal();build();info('林の判定：航空写真から判定しました（'+W+'×'+H+'画素・約'+mPerPx.toFixed(1)+'m'+(d.failTiles?'・読めなかった写真'+d.failTiles+'枚':'')+'）。端末に保存済み')}
+    catch(e){info('✗ 林の判定：'+e.message)}}
+  $f('fRun').onclick=()=>{if(data&&!confirm('航空写真から判定し直しますか？（塗り直した部分は消えます）'))return;data=null;run()};
+  $f('fExport').onclick=()=>{if(!data){alert('まだ判定結果がありません');return}const cv=document.createElement('canvas');cv.width=W;cv.height=H;const c=cv.getContext('2d'),im=c.createImageData(W,H);
+    for(let k=0;k<W*H;k++){im.data[k*4]=data.dark[k];im.data[k*4+1]=data.tex[k];im.data[k*4+2]=data.paint[k]===2?255:data.paint[k]===1?128:0;im.data[k*4+3]=255}
+    c.putImageData(im,0,0);cv.toBlob(b=>saveBlobFile(b,'forest-mask.png'),'image/png')};
+  // --- 編集モード：塗り直し（1本指でなぞる。地図は動かない）---
+  if(EDIT){const cv=scene.canvas;let stroke=null,raf=0;
+    row.querySelectorAll('.fp button').forEach(b=>b.onclick=()=>{paintMode=b.dataset.m;row.querySelectorAll('.fp button').forEach(x=>x.classList.toggle('on',x===b&&!!paintMode));
+      info(paintMode?'塗り直し中：画面を1本指でなぞってください（2本指で地図操作）':'林の判定：'+src)});
+    $f('fBrush').oninput=()=>{st.brush=+$f('fBrush').value;keep()};
+    const ground=e=>{const r=cv.getBoundingClientRect(),w=new Cesium.Cartesian2(e.clientX-r.left,e.clientY-r.top),ray=camera.getPickRay(w),g=ray&&globe.pick(ray,scene);if(!g)return null;const c=Cesium.Cartographic.fromCartesian(g);return toPx(Cesium.Math.toDegrees(c.longitude),Cesium.Math.toDegrees(c.latitude))};
+    function dab(px,py,box){const r=st.brush/mPerPx,code=paintMode==='forest'?1:paintMode==='open'?2:0,xa=Math.max(0,Math.floor(px-r)),xb=Math.min(W-1,Math.ceil(px+r)),ya=Math.max(0,Math.floor(py-r)),yb=Math.min(H-1,Math.ceil(py+r));
+      for(let y=ya;y<=yb;y++)for(let x=xa;x<=xb;x++)if((x-px)**2+(y-py)**2<=r*r)data.paint[y*W+x]=code;
+      box.xa=Math.min(box.xa,xa);box.xb=Math.max(box.xb,xb);box.ya=Math.min(box.ya,ya);box.yb=Math.max(box.yb,yb)}
+    function flush(){raf=0;if(!stroke||!stroke.box||stroke.box.xb<stroke.box.xa)return;const b=stroke.box,w=b.xb-b.xa+1,h=b.yb-b.ya+1;
+      tex.paint.copyFrom({source:{width:w,height:h,arrayBufferView:paintRGBA(b.xa,b.ya,w,h)},xOffset:b.xa,yOffset:b.ya});stroke.box={xa:1e9,xb:-1,ya:1e9,yb:-1};scene.requestRender()}
+    function to(e){const q=ground(e);if(!q)return;const lp=stroke.last||q,d=Math.hypot(q[0]-lp[0],q[1]-lp[1]),step=Math.max(1,st.brush/mPerPx/2),n=Math.ceil(d/step);
+      for(let i=1;i<=n||i===1;i++){const t=n?i/n:1;dab(lp[0]+(q[0]-lp[0])*t,lp[1]+(q[1]-lp[1])*t,stroke.box);if(!n)break}stroke.last=q;if(!raf)raf=requestAnimationFrame(flush)}  // 指の動きの間も途切れないよう補間して塗る
+    // コース編集や地図操作より先に受ける（documentの捕捉段階）
+    document.addEventListener('pointerdown',e=>{if(!paintMode||e.target!==cv||!data||!tex.paint||stroke)return;e.stopPropagation();stroke={id:e.pointerId,last:null,box:{xa:1e9,xb:-1,ya:1e9,yb:-1}};to(e)},true);
+    document.addEventListener('pointermove',e=>{if(!stroke||e.pointerId!==stroke.id)return;e.stopPropagation();to(e)},true);
+    const up=e=>{if(!stroke||e.pointerId!==stroke.id)return;e.stopPropagation();flush();stroke=null;clearTimeout(saveT);saveT=setTimeout(()=>{saveLocal().then(ok=>info(ok?'塗り直しを端末に保存しました（PNG書き出しでファイルにも保存できます）':'✗ 塗り直しを端末に保存できませんでした'))},800)};
+    document.addEventListener('pointerup',up,true);document.addEventListener('pointercancel',up,true);
+    window.__forestPainting=()=>!!paintMode}
+  {const start=()=>setTimeout(()=>{if(st.on)load(true);else load(false)},1500);if(document.readyState==='complete')start();else addEventListener('load',start,{once:true})}  // ページの読み込みが終わってから（写真の読み込みでページの表示を遅らせない）
+  return {get data(){return data},W,H,toPx,st,setU,get material(){return material}};
+})();  // loadObj3d は失敗しても例外を投げないので、リフトが失敗しても建物は読む
 // ===== 視点スティック（左下）=====
 // FPSの右スティックと同じ：左右に倒すとその場で左右に回り、上下に倒すと見上げ・見下ろし。カメラの位置は変えない。
 // 倒している間は一定速度で回り続け、離すと即停止。指ごとに追跡するので、ミニマップなどと同時に操作できる。
