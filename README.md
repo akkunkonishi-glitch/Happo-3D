@@ -49,7 +49,7 @@ node tools/make-courses.js overpass.json
 ### リフト・建物の立体表示
 
 - リフト：`cesium/data/lifts.geojson`、建物：`cesium/data/buildings.geojson` を読みます（© OpenStreetMap contributors）。
-- 林と開けた斜面の判定結果：`cesium/data/forest-mask.png`（パネルの「判定結果をPNG書き出し」で作成。R=暗さ・G=模様・B=塗り直し）があれば読み、無ければブラウザで航空写真から判定して端末に保存します。
+- 林：`cesium/data/forests.geojson`（編集モードの「林を描く」で作り、「林を書き出す」で保存。kind=forest、density=木の密度1〜10）があれば読みます。カメラの近くだけ雪をかぶった針葉樹の3Dモデルを並べ、遠くは範囲を白っぽく塗ります。
   ファイルが無い間は、端末に保存した前回の取得結果、それも無ければブラウザから Overpass API で取得します。
 - リフトは aerialway=pylon の支柱位置に柱（チェア10m・ゴンドラ14m・Tバー等6m）を立て、頂点どうしをワイヤーで結びます。支柱データが無いリフトは一定間隔（チェア約90m・ゴンドラ約200m）で支柱を自動生成します。
 - リフトの駅舎：OSMの駅舎の面（aerialway=station）があればそれを優先、駅の点だけならその位置に、どちらも無ければ線の始点・終点に10m角・高さ6mの箱を自動で置きます。編集モード（?edit=1）では箱をドラッグして位置を直せます（端末に保存、lifts3d書き出しに含まれます）。

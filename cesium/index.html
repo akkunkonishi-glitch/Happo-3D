@@ -139,15 +139,8 @@ const SETTINGS={
   snowSunHourJST:11, // 雪面の陰影に使う太陽の時刻（日本時間）。夜に開いても雪面が暗くならないよう固定
   snowShadeMin:0.6,  // 一番暗い日陰の斜面の明るさ(0〜1)
   snowShadeStrength:1.3,// 斜面の向きによる明暗の強さ（0で陰影なし）
-  forestZoom:16,     // 林の判定に使う航空写真のズーム（16＝約1.9m/画素、管理区域で約160枚）
-  forestDown:2,      // 判定結果の解像度＝写真の画素をこの数ずつまとめる（2で約3.8m）
-  forestWindow:3,    // 暗さ・模様を測る範囲（まとめた画素の半径。3で周囲約27m）
-  forestDark:0.62,   // 林と判定する暗さのしきい値の初期値(0〜1、大きいほど暗い所だけ林)。パネルで変更可
-  forestTexture:0.18,// 林と判定する模様の細かさ（明るさのばらつき）のしきい値の初期値(0〜1)。パネルで変更可
-  forestAlpha:0.5,   // 林の上に重ねる白の濃さの初期値（雪をかぶった木の見え方）
-  forestBrush:15,    // 編集モードの塗り直しの筆の半径(m)の初期値
-  treeDensity:3,     // 3Dの木の密度の初期値(1〜10)。木の間隔(m)＝24÷密度
-  treeDistance:500,  // 3Dの木を立てるカメラからの距離(m)の初期値。これより遠くは白い重ね塗りの表現のまま
+  treeDensity:4,     // 新しく描いた林の木の密度の初期値(1〜10)。木の間隔(m)＝24÷密度。林ごとに編集モードで変更できる
+  treeDistance:400,  // 3Dの木を立てるカメラからの距離(m)の初期値。これより遠くは林の範囲を白っぽく塗るだけ
   treeHeight:[7,14], // 木の高さの範囲(m)
   treeMax:6000,      // 一度に立てる木の上限（多すぎるときはカメラに近い順）
   stickYawSpeed:60,  // 視点スティック：左右に回る速さ(度/秒、倒し量に関係なく一定)
@@ -410,7 +403,6 @@ ssc.rotateEventTypes=[];ssc.inertiaSpin=SETTINGS.inertiaSpin;ssc.inertiaTranslat
   const el=scene.canvas,ptrs=new Map();let grab=null;
   const local=e=>{const r=el.getBoundingClientRect();return {x:e.clientX-r.left,y:e.clientY-r.top}};
   el.addEventListener('pointerdown',e=>{ptrs.set(e.pointerId,1);
-    if(EDIT&&window.__forestPainting&&window.__forestPainting()){grab=null;return}
     if(EDIT&&window.__editHit){const r=el.getBoundingClientRect();if(window.__editHit(e.clientX-r.left,e.clientY-r.top)){grab=null;return}}  // 編集モードで頂点をつかんだときは頂点操作に回す
     if(ptrs.size===1&&(e.pointerType!=='mouse'||e.button===0)&&!e.ctrlKey&&!e.shiftKey){const p=local(e),ray=camera.getPickRay(new Cesium.Cartesian2(p.x,p.y)),P0=ray&&globe.pick(ray,scene);
       grab={P0,normal:P0?Cesium.Ellipsoid.WGS84.geodeticSurfaceNormal(P0,new Cesium.Cartesian3()):null,last:p}}else grab=null});
@@ -627,10 +619,17 @@ const snowLayer=(()=>{
 let courseGeo={type:'FeatureCollection',properties:{},features:[]};
 const featEnts=new Map();let editSel=null;
 const isCourse=ft=>ft.properties.kind==='course'&&ft.geometry.type==='Polygon';
+const isForest=ft=>!!ft&&!!ft.properties&&ft.properties.kind==='forest'&&!!ft.geometry&&ft.geometry.type==='Polygon';  // 手で描いた林（forests.geojson）
+const isPoly=ft=>isCourse(ft)||isForest(ft);  // 編集できる多角形（コース・林）
+const coursesOnly=g=>Object.assign({},g,{features:(g.features||[]).filter(f=>!isForest(f))});  // コースの保存・書き出しには林を含めない
 const courseRing=ft=>ft.geometry.coordinates[0];
+const FOREST_FILL=Cesium.Color.fromCssColorString('#eef4f1').withAlpha(0.6),FOREST_EDGE=Cesium.Color.fromCssColorString('#2f5d3c').withAlpha(0.9);
 function addCourseFeature(ft){
   const out=[],add=o=>{out.push(courseSrc.entities.add(o))},deg=c=>Cesium.Cartesian3.fromDegreesArray(c.flat());
-  if(isCourse(ft)){const sel=ft===editSel,rings=ft.geometry.coordinates,m=matsFor(ft.properties.color);
+  if(isForest(ft)){const sel=ft===editSel,rings=ft.geometry.coordinates;  // 林：遠くからは範囲を白っぽく塗るだけ（近くは3Dの木）
+    add({polygon:{hierarchy:new Cesium.PolygonHierarchy(deg(rings[0]),rings.slice(1).map(h=>new Cesium.PolygonHierarchy(deg(h)))),material:sel?Cesium.Color.fromCssColorString('#ff9800').withAlpha(0.45):FOREST_FILL,classificationType:Cesium.ClassificationType.TERRAIN}});
+    for(const r of rings)add({polyline:{positions:deg(r),width:sel?3.5:2,material:sel?Cesium.Color.fromCssColorString('#ff6d00'):FOREST_EDGE,clampToGround:true}})}
+  else if(isCourse(ft)){const sel=ft===editSel,rings=ft.geometry.coordinates,m=matsFor(ft.properties.color);
     if(sel||!snowState.on)add({polygon:{hierarchy:new Cesium.PolygonHierarchy(deg(rings[0]),rings.slice(1).map(h=>new Cesium.PolygonHierarchy(deg(h)))),material:sel?Cesium.Color.fromCssColorString('#ff9800').withAlpha(0.5):m.fill,classificationType:Cesium.ClassificationType.TERRAIN}});
     for(const r of rings)add({polyline:{positions:deg(r),width:sel?3.5:2,material:sel?Cesium.Color.fromCssColorString('#ff6d00'):m.edge,clampToGround:true}})}
   else if(ft.properties.kind==='lift'&&ft.geometry.coordinates.length>=2){const c=ft.geometry.coordinates,mid=c[Math.floor(c.length/2)];
@@ -806,10 +805,10 @@ document.getElementById('courseOn').onchange=e=>{courseSrc.show=e.target.checked
 document.getElementById('courseAlpha').oninput=e=>{courseAlpha=+e.target.value;for(const m of courseMats.values()){const c=m.base;m.fill.color=c.withAlpha(courseAlpha);m.edge.color=new Cesium.Color(c.red*0.45,c.green*0.55,c.blue*0.6,Math.min(1,courseAlpha*1.6+0.2))}scene.requestRender()};
 // ミニマップにもコース（各色）・リフト(白)を表示（選択中はオレンジ）
 mini.hooks.draw=(ctx,proj)=>{if(!courseSrc.show)return;
-  for(const ft of courseGeo.features){const lift=ft.properties.kind==='lift';if(!lift&&!isCourse(ft))continue;const c=lift?ft.geometry.coordinates:courseRing(ft);
+  for(const ft of courseGeo.features){const lift=ft.properties.kind==='lift';if(!lift&&!isPoly(ft))continue;const c=lift?ft.geometry.coordinates:courseRing(ft);
     ctx.beginPath();c.forEach((q,i)=>{const [x,y]=proj(q[0],q[1]);i?ctx.lineTo(x,y):ctx.moveTo(x,y)});
     if(lift){ctx.strokeStyle='#fff';ctx.lineWidth=2;ctx.stroke();continue}
-    const sel=ft===editSel,col=Cesium.Color.fromCssColorString(ft.properties.color||COURSE.fill);
+    const sel=ft===editSel,col=Cesium.Color.fromCssColorString(isForest(ft)?'#5f8f6c':(ft.properties.color||COURSE.fill));
     ctx.fillStyle=sel?'rgba(255,170,80,0.45)':col.withAlpha(0.4).toCssColorString();ctx.fill();ctx.strokeStyle=sel?'#ff6d00':new Cesium.Color(col.red*0.45,col.green*0.55,col.blue*0.6,1).toCssColorString();ctx.lineWidth=sel?2.5:1.2;ctx.stroke()}};
 
 // ===== コース編集モード（URLに ?edit=1 を付けたときだけ）=====
@@ -821,8 +820,9 @@ const editor=EDIT?(function(){
   if(!window.polygonClipping){const sc=document.createElement('script');sc.src='https://cdn.jsdelivr.net/npm/polygon-clipping@0.15.7/dist/polygon-clipping.umd.min.js';document.head.appendChild(sc)}  // 結合用
   const row=document.createElement('div');row.id='editRow';
   row.innerHTML='<b>コース編集モード</b><div class="ei"></div>'+
-    '<div><button id="eNew">新規コース</button><button id="eFinish">確定</button><button id="eCancel">作成をキャンセル</button></div><div><button id="eCreUndo">1点戻す</button><button id="eCreRedo">やり直し</button></div>'+
+    '<div><button id="eNew">新規コース</button><button id="eForest">林を描く</button><button id="eFinish">確定</button><button id="eCancel">作成をキャンセル</button></div><div><button id="eCreUndo">1点戻す</button><button id="eCreRedo">やり直し</button></div>'+
     '<div><button id="eRename">名前変更</button> 色 <input type="color" id="eColor" value="#8cecff"><button id="eColorReset">既定色</button></div>'+
+    '<div id="eDenRow" style="display:none">この林の木の密度 <input type="range" id="eDen" min="1" max="10" step="1"> <span id="eDenV"></span></div>'+
     '<div><button id="eDup">複製</button><button id="eDelete">このコースを削除</button></div><div><button id="eSplit">分割</button><button id="eMerge">結合</button></div>'+
     '<div><button id="eUndo">元に戻す</button><button id="eDeselect">選択解除</button></div>'+
     '<div><button id="eExport">GeoJSONを書き出す</button><button id="eDiscard">編集を破棄</button><button id="eOsm">OSMから作成</button></div>'+
@@ -831,19 +831,21 @@ const editor=EDIT?(function(){
   document.getElementById('courseRow').after(row);
   const $=id=>document.getElementById(id),infoEl=row.querySelector('.ei');
   const mk=new Cesium.CustomDataSource('editMarkers');viewer.dataSources.add(mk);
-  let creating=null,merging=false,vSel=[],drag=null,down=null,lp=null,saveT=null,raf=0,msg='';const ptrs=new Set(),undoStack=[];
+  let creKind='course',creating=null,merging=false,vSel=[],drag=null,down=null,lp=null,saveT=null,raf=0,msg='';const ptrs=new Set(),undoStack=[];
   const ORANGE=Cesium.Color.fromCssColorString('#ff6d00'),BLUE=Cesium.Color.fromCssColorString('#2979ff');
   // --- 保存・取り消し ---
   function save(){clearTimeout(saveT);saveT=setTimeout(()=>{saveT=null;courseGeo.properties=courseGeo.properties||{};courseGeo.properties.edited=new Date().toISOString();
     if(renderTrouble){save();return}  // 描画エラーから立ち直るまでは保存を待つ
     if(courseBase.hold){showSave({ok:false,why:'上書きを止めています（端末の別データを守るため）'});return}
-    saveCoursesSafe(COURSE.keys.edit,courseGeo).then(r=>{
-      if(r.ask){if(confirm(r.ask))saveCoursesSafe(COURSE.keys.edit,courseGeo,{force:true}).then(showSave);
+    forests.save();  // 林は別に保存（forests用）
+    saveCoursesSafe(COURSE.keys.edit,coursesOnly(courseGeo)).then(r=>{
+      if(r.ask){if(confirm(r.ask))saveCoursesSafe(COURSE.keys.edit,coursesOnly(courseGeo),{force:true}).then(showSave);
         else{courseBase.hold=true;showSave({ok:false,why:'上書きを止めています。端末のデータは「保存データを確認・復旧」から読み込めます'})}return}
       showSave(r)})},300)}
   function showSave(r){document.getElementById('courseInfo').textContent=courseCounts()+(r.ok?'（端末で編集中のデータ・自動保存済み／前の'+GEN_N+'版をバックアップ）':'（⚠ 保存していません：'+r.why+'。前回の保存はそのまま残っています）');
     if(!r.ok)courseLog.add('⚠ 保存していません：'+r.why,'ng')}
   function pushUndo(){undoStack.push({geo:JSON.stringify(courseGeo),sel:editSel&&editSel.properties.id});if(undoStack.length>40)undoStack.shift()}
+  const withForests=g=>{const fs=courseGeo.features.filter(isForest);g.features=(g.features||[]).filter(f=>!isForest(f)).concat(fs);return g};  // コースだけのデータに今の林を足す
   function changed(...fts){for(const f of fts)redrawFeature(f);save();markers();info()}
   // ドラッグ中のプレビュー・指の状態・長押しタイマー・頂点マーカーをすべて片付ける（削除・結合・分割・元に戻す・描画エラーのとき）
   function cancelInteraction(){clearTimeout(lp);lp=null;if(raf){cancelAnimationFrame(raf);raf=0}
@@ -904,7 +906,7 @@ const editor=EDIT?(function(){
     else if(op.t==='del'){if(undo){if(op.i>n||!okPt(op.p))return false;creating.splice(op.i,0,op.p.slice())}else{if(op.i>=n)return false;creating.splice(op.i,1)}}
     else if(op.t==='move'){if(op.i>=n)return false;const q=undo?op.from:op.to;if(!okPt(q))return false;creating[op.i]=q.slice()}
     else return false;return true}
-  function saveDraft(){try{if(creating)localStorage.setItem(DRAFT_KEY,JSON.stringify({v:1,points:creating,ops:creOps,redo:creRedo,saved:new Date().toISOString()}));else localStorage.removeItem(DRAFT_KEY)}catch(e){}}  // 点を打つたびに端末へ保存
+  function saveDraft(){try{if(creating)localStorage.setItem(DRAFT_KEY,JSON.stringify({v:1,kind:creKind,points:creating,ops:creOps,redo:creRedo,saved:new Date().toISOString()}));else localStorage.removeItem(DRAFT_KEY)}catch(e){}}  // 点を打つたびに端末へ保存
   function creChanged(){saveDraft();markers();info()}
   function creDo(op){if(creApply(op,false)){creOps.push(op);creRedo.length=0}creChanged()}
   function creUndo(){const op=creOps.pop();if(!op)return;if(creApply(op,true))creRedo.push(op);creChanged()}
@@ -932,12 +934,13 @@ const editor=EDIT?(function(){
     $('eFinish').style.display=$('eCancel').style.display=creating?'':'none';$('eCreUndo').style.display=$('eCreRedo').style.display=creating||liftSel?'':'none';
     $('eCreUndo').disabled=creating?!creOps.length:!liftOps.length;$('eCreRedo').disabled=creating?!creRedo.length:!liftRedo.length;
     for(const id of ['eRename','eColor','eColorReset','eSplit','eMerge','eDelete','eDup'])$(id).disabled=!editSel||!!creating;
+    {const fo=!!editSel&&isForest(editSel)&&!creating;$('eDenRow').style.display=fo?'':'none';if(fo)$('eDen').value=editSel.properties.density||SETTINGS.treeDensity;$('eColor').disabled=$('eColor').disabled||fo;$('eColorReset').disabled=$('eColorReset').disabled||fo}
     $('eUndo').disabled=creating?!creOps.length:!undoStack.length;
     if(editSel)$('eColor').value=editSel.properties.color||COURSE.fill;
-    infoEl.textContent=msg||(creating?'新規コース：地面をタップして頂点を打つ（'+creating.length+'点、3点以上で「確定」）　点をドラッグ＝移動／長押し＝その点を消す／「1点戻す」「やり直し」で1つずつ':
+    infoEl.textContent=msg||(creating?(creKind==='forest'?'林を描く':'新規コース')+'：地面をタップして頂点を打つ（'+creating.length+'点、3点以上で「確定」）　点をドラッグ＝移動／長押し＝その点を消す／「1点戻す」「やり直し」で1つずつ':
       merging?'結合：隣のコースをタップしてください（取り消すにはもう一度「結合」）':
       liftSel?'リフト選択中：'+(liftSel.properties.name||'名前なし')+'（支柱'+((liftSel.properties.towers||[]).length)+'本）　起点・終点（駅舎の箱）をドラッグ＝端を移動／青い線をドラッグ＝リフトごと移動／「1点戻す」「やり直し」で1操作ずつ':
-      editSel?'選択中：'+(editSel.properties.name||'名前なし')+'（頂点'+verts().length+(vSel.length?'・選択頂点'+vSel.length:'')+'）　内側をドラッグ＝コースごと移動／頂点ドラッグ＝頂点移動／辺タップ＝追加／長押し＝削除／頂点タップ＝選ぶ':
+      editSel?(isForest(editSel)?'林を選択中：':'選択中：')+(editSel.properties.name||'名前なし')+(isForest(editSel)?'（木の密度'+(editSel.properties.density||SETTINGS.treeDensity)+'）':'')+'（頂点'+verts().length+(vSel.length?'・選択頂点'+vSel.length:'')+'）　内側をドラッグ＝コースごと移動／頂点ドラッグ＝頂点移動／辺タップ＝追加／長押し＝削除／頂点タップ＝選ぶ':
       'コースをタップして選択。頂点以外のドラッグは地図の移動');msg=''}
   function select(ft){if(ft)liftSel=null;const old=editSel;editSel=ft;vSel=[];merging=false;if(!ft)hideMenu();if(old)redrawFeature(old);if(ft)redrawFeature(ft);markers();info()}
   function live(){if(!raf)raf=requestAnimationFrame(()=>{raf=0;redrawFeature(editSel);markers()})}
@@ -970,10 +973,10 @@ const editor=EDIT?(function(){
   function delV(i){const r=courseRing(editSel);if(r.length-1<=3){alert('コースの頂点は3点より少なくできません');return}pushUndo();r.splice(i,1);if(i===0)r[r.length-1]=r[0].slice();vSel=[];changed(editSel)}
   function inRing(p,r){let ins=false;for(let i=0,j=r.length-1;i<r.length;j=i++){const a=r[i],b=r[j];if((a[1]>p[1])!==(b[1]>p[1])&&p[0]<(b[0]-a[0])*(p[1]-a[1])/(b[1]-a[1])+a[0])ins=!ins}return ins}
   const area=r=>Math.abs(r.reduce((s,q,i)=>i?s+(r[i-1][0]*q[1]-q[0]*r[i-1][1]):0,0));
-  function courseAt(ll){let best=null;if(ll)for(const ft of courseGeo.features){if(!isCourse(ft)||!inRing(ll,courseRing(ft)))continue;const a=area(courseRing(ft));if(!best||a<best.a)best={ft,a}}return best&&best.ft}  // 重なっていれば小さい方
+  function courseAt(ll,kind){let best=null;if(ll)for(const ft of courseGeo.features){if(!isPoly(ft)||(kind&&ft.properties.kind!==kind)||!inRing(ll,courseRing(ft)))continue;const a=area(courseRing(ft));if(!best||a<best.a)best={ft,a}}return best&&best.ft}  // 重なっていれば小さい方
   function tap(x,y){
     if(creating){if(nearestCre(x,y,14)>=0)return;const ll=pickLL(x,y);if(ll)creDo({t:'add',i:creating.length,p:ll});return}  // 既存の点の上をタップしても重ねて打たない
-    if(merging){const b=courseAt(pickLL(x,y));if(b&&b!==editSel)doMerge(b);else{msg='結合する隣のコースをタップしてください';info()}return}
+    if(merging){const b=courseAt(pickLL(x,y),editSel&&editSel.properties.kind);if(b&&b!==editSel)doMerge(b);else{msg='結合する隣のコースをタップしてください';info()}return}
     if(editSel){const v=nearestVertex(x,y,14);  // タップは頂点の近く(14px)だけ頂点扱い。少し離れた辺のタップは頂点追加にする
       if(v>=0){vSel=vSel.includes(v)?vSel.filter(i=>i!==v):[...vSel.slice(-1),v];markers();info();return}  // 頂点を選ぶ（最大2つ）
       const e=nearestEdge(x,y,18);if(e){pushUndo();courseRing(editSel).splice(e.i+1,0,e.ll);vSel=[];changed(editSel);return}}  // 辺をタップ→頂点追加
@@ -1048,14 +1051,19 @@ const editor=EDIT?(function(){
   menu.addEventListener('click',e=>{const a=e.target.dataset&&e.target.dataset.a;if(!a)return;hideMenu();
     if(a==='dup')duplicateSel();else if(a==='rename')renameSel();else if(a==='del')deleteSel()});
   // --- ボタン ---
-  $('eNew').onclick=()=>{if(creating&&creating.length&&!confirm('作成中の'+creating.length+'点を破棄して、新しく作り始めますか？'))return;select(null);creReset();creating=[];creChanged()};
+  function startCreate(kind){if(creating&&creating.length&&!confirm('作成中の'+creating.length+'点を破棄して、新しく作り始めますか？'))return;select(null);selectLift(null);creReset();creKind=kind;creating=[];creChanged()}
+  $('eNew').onclick=()=>startCreate('course');
+  $('eDen').oninput=()=>{if(!editSel||!isForest(editSel))return;if(!$('eDen').__undo){pushUndo();$('eDen').__undo=true}editSel.properties.density=+$('eDen').value;$('eDenV').textContent='間隔約'+Math.round(24/editSel.properties.density)+'m';save();info()};
+  $('eDen').onchange=()=>{$('eDen').__undo=false};  // 林ごとの木の密度
+  $('eForest').onclick=()=>startCreate('forest');  // 林の範囲を点で描く（操作はコースと同じ）
   $('eCancel').onclick=()=>{if(creating&&creating.length&&!confirm('作成中の'+creating.length+'点をすべて消して、作成をやめますか？'))return;creReset();markers();info()};  // 全部消すのはこのボタンだけ（確認あり）
   $('eCreUndo').onclick=()=>{if(creating)creUndo();else liftUndo()};
   $('eCreRedo').onclick=()=>{if(creating)creRedoOne();else liftRedoOne()};
   $('eFinish').onclick=()=>{if(!creating||creating.length<3){alert('3点以上打ってください');return}
     const ring=HappoCourses.cleanRing(creating,false);if(!ring){alert('形が正しくありません');return}
-    pushUndo();const n=courseGeo.features.filter(f=>f.properties.source==='manual').length+1;
-    const ft={type:'Feature',properties:{id:'manual/'+Date.now().toString(36),kind:'course',name:'新規コース'+n,difficulty:'',source:'manual'},geometry:{type:'Polygon',coordinates:[ring]}};
+    pushUndo();const n=courseGeo.features.filter(f=>f.properties.source==='manual'&&f.properties.kind===creKind).length+1;
+    const ft=creKind==='forest'?{type:'Feature',properties:{id:'forest/'+Date.now().toString(36),kind:'forest',name:'林'+n,density:SETTINGS.treeDensity,source:'manual'},geometry:{type:'Polygon',coordinates:[ring]}}
+      :{type:'Feature',properties:{id:'manual/'+Date.now().toString(36),kind:'course',name:'新規コース'+n,difficulty:'',source:'manual'},geometry:{type:'Polygon',coordinates:[ring]}};
     creReset();courseGeo.features.push(ft);addCourseFeature(ft);save();select(ft)};  // 確定したら作成途中の保存は消す
   $('eDeselect').onclick=()=>select(null);
   $('eRename').onclick=()=>renameSel();
@@ -1066,13 +1074,13 @@ const editor=EDIT?(function(){
   $('eDup').onclick=()=>duplicateSel();
   $('eUndo').onclick=()=>{if(creating){creUndo();return}  // 作成中は「元に戻す」も1点ずつ
     const u=undoStack.pop();if(!u)return;cancelInteraction();courseGeo=JSON.parse(u.geo);editSel=courseGeo.features.find(f=>f.properties.id===u.sel)||null;vSel=[];creating=null;merging=false;hideMenu();drawCourses();save();markers();info()};
-  $('eExport').onclick=async()=>{const g=JSON.parse(JSON.stringify(courseGeo,(k,v)=>k.startsWith('__')?undefined:v)),txt=JSON.stringify(g);
+  $('eExport').onclick=async()=>{const g=JSON.parse(JSON.stringify(coursesOnly(courseGeo),(k,v)=>k.startsWith('__')?undefined:v)),txt=JSON.stringify(g);
     alert(await copyText(txt)?'GeoJSONをクリップボードにコピーしました（'+Math.round(txt.length/1024)+'KB）':'コピーできませんでした')};
   $('eDiscard').onclick=()=>{if(!confirm('端末に保存した編集内容を破棄して元のデータに戻しますか？'))return;try{localStorage.removeItem(COURSE.keys.edit);localStorage.removeItem(COURSE.keys.edit+'.bak');localStorage.removeItem(COURSE.keys.oldEdit)}catch(e){}  // 世代バックアップは残す（復旧ボタンから戻せる）
-    cancelInteraction();editSel=null;creReset();vSel=[];undoStack.length=0;hideMenu();loadCourses().then(()=>{markers();info()})};
+    cancelInteraction();editSel=null;creReset();vSel=[];undoStack.length=0;hideMenu();loadCourses().then(()=>{forests.load();markers();info()})};
   $('eOsm').onclick=async()=>{if(courseGeo.features.length&&!confirm('今のコースデータを OpenStreetMap から作り直します（中心線は幅'+COURSE.width+'mのポリゴンに変換）。よろしいですか？'))return;
     infoEl.textContent='OpenStreetMapから取得中…（取得状況はコース欄に表示）';courseLog.clear();
-    try{const g=await fetchOsmCourses();pushUndo();cancelInteraction();courseGeo=g;editSel=null;vSel=[];hideMenu();drawCourses();save();markers();info()}catch(e){alert('取得できませんでした：'+(e&&e.message||e));info()}};
+    try{const g=await fetchOsmCourses();pushUndo();cancelInteraction();courseGeo=withForests(g);editSel=null;vSel=[];hideMenu();drawCourses();save();markers();info()}catch(e){alert('取得できませんでした：'+(e&&e.message||e));info()}};
   // --- 保存データの確認・復旧：端末に残っているコースデータを一覧し、選んで復元（壊れていても読める部分だけ復元）---
   const rec=document.createElement('div');rec.id='recoverBox';document.body.appendChild(rec);
   async function openRecover(){const K=COURSE.keys,list=[[K.edit,'編集中データ（本体）'],...[1,2,3,4,5].map(i=>[genKey(K.edit,i),'バックアップ '+i+'つ前の版'+(i>GEN_N?'（以前の方式で残ったもの）':'')]),[K.edit+'.bak','旧バックアップ(.bak)'],[K.oldEdit,'旧バージョンの編集データ'],[K.auto,'OSMから自動生成した一時データ'],[K.oldOsm,'旧バージョンのOSMデータ']];
@@ -1089,38 +1097,38 @@ const editor=EDIT?(function(){
     const u=document.createElement('div');u.className='rn';u.textContent='端末の保存容量の使用：約'+Math.round(used*2/1024)+'KB';el.appendChild(u);
     rec.onclick=e=>{const t=e.target;if(t.dataset.a==='close'){rec.style.display='none';return}if(t.dataset.i==null)return;const x=rows[+t.dataset.i];
       if(!confirm('「'+x.label+'」のコースで今の表示を置き換えますか？\n今の状態は「元に戻す」と世代バックアップで戻せます'))return;
-      pushUndo();cancelInteraction();courseGeo=HappoCourses.normalizeCourses(x.r.geo,{width:COURSE.width});courseBase.fromEdit=true;courseBase.hold=false;editSel=null;vSel=[];hideMenu();drawCourses();save();markers();info();
+      pushUndo();cancelInteraction();courseGeo=withForests(HappoCourses.normalizeCourses(x.r.geo,{width:COURSE.width}));courseBase.fromEdit=true;courseBase.hold=false;editSel=null;vSel=[];hideMenu();drawCourses();save();markers();info();
       courseLog.add('✓ 「'+x.label+'」から'+courseGeo.features.filter(isCourse).length+'件を復元しました','ok');rec.style.display='none'}}
   // 作成途中のコースを端末から復元（ページを開き直したとき・エラーで止まったあと）
   try{const d=JSON.parse(localStorage.getItem(DRAFT_KEY)||'null');
-    if(d&&Array.isArray(d.points)){creating=d.points.filter(okPt).map(q=>[+q[0],+q[1]]);creOps=Array.isArray(d.ops)?d.ops:[];creRedo=Array.isArray(d.redo)?d.redo:[];
+    if(d&&Array.isArray(d.points)){creKind=d.kind==='forest'?'forest':'course';creating=d.points.filter(okPt).map(q=>[+q[0],+q[1]]);creOps=Array.isArray(d.ops)?d.ops:[];creRedo=Array.isArray(d.redo)?d.redo:[];
       msg='作成途中の新規コース（'+creating.length+'点）を復元しました。続けて点を打つか「確定」してください';courseLog.add('✓ 作成途中の新規コース（'+creating.length+'点）を端末から復元しました','ok')}}catch(e){}
   $('eRecover').onclick=()=>{openRecover().catch(e=>alert('確認できませんでした：'+(e&&e.message||e)))};
   // 前の版に戻す（押すたびに1つ前へ。今の版はバックアップの最後に回るので消えない）
   let prevBusy=false;
   $('ePrev').onclick=()=>{if(prevBusy)return;prevBusy=true;$('ePrev').disabled=true;stepPrev().finally(()=>{prevBusy=false;$('ePrev').disabled=false})};  // 処理中の連打は無視
-  async function stepPrev(){if(saveT){clearTimeout(saveT);saveT=null;if(!courseBase.hold){const r=await saveCoursesSafe(COURSE.keys.edit,courseGeo);if(!r.ok&&!r.ask)showSave(r)}}  // 保存待ちの変更を先に保存
+  async function stepPrev(){if(saveT){clearTimeout(saveT);saveT=null;forests.save();if(!courseBase.hold){const r=await saveCoursesSafe(COURSE.keys.edit,coursesOnly(courseGeo));if(!r.ok&&!r.ask)showSave(r)}}  // 保存待ちの変更を先に保存
     const r1=await readCourseKey(genKey(COURSE.keys.edit,1));if(!r1.geo){alert('戻せる前の版がありません');return}
     const t=r1.edited?new Date(r1.edited):null,ts=t&&!isNaN(t)?(t.getMonth()+1)+'/'+t.getDate()+' '+t.getHours()+':'+String(t.getMinutes()).padStart(2,'0'):'日時不明';
     if(!confirm('1つ前の版（コース'+courseCount(r1.geo)+'件・'+ts+'保存）に戻しますか？\n今の版はバックアップに残ります（もう一度押すとさらに前へ）'))return;
     const r=await stepBackCourses(COURSE.keys.edit);if(!r.ok){alert(r.why);return}
-    pushUndo();cancelInteraction();courseGeo=HappoCourses.normalizeCourses(r.geo,{width:COURSE.width});courseBase.hold=false;editSel=null;vSel=[];hideMenu();drawCourses();markers();info();
+    pushUndo();cancelInteraction();courseGeo=withForests(HappoCourses.normalizeCourses(r.geo,{width:COURSE.width}));courseBase.hold=false;editSel=null;vSel=[];hideMenu();drawCourses();markers();info();
     document.getElementById('courseInfo').textContent=courseCounts()+'（前の版に戻しました・'+ts+'保存の版）';courseLog.add('✓ 前の版に戻しました（コース'+r.n+'件）','ok')}
   // ファイルとして保存（共有シートの「ファイルに保存」でiPadのファイルAppへ）
-  $('eFile').onclick=()=>{const v=validateCourseGeo(courseGeo);if(!v.ok&&!confirm('データに問題があります（'+v.why+'）。そのまま書き出しますか？'))return;
-    const g=v.ok?v.geo:JSON.parse(JSON.stringify(courseGeo,(k,x)=>k.startsWith('__')?undefined:x));
+  $('eFile').onclick=()=>{const cg=coursesOnly(courseGeo),v=validateCourseGeo(cg);if(!v.ok&&!confirm('データに問題があります（'+v.why+'）。そのまま書き出しますか？'))return;
+    const g=v.ok?v.geo:JSON.parse(JSON.stringify(cg,(k,x)=>k.startsWith('__')?undefined:x));
     saveAsFile(g,stampName('happo-courses','.geojson')).then(m=>{if(m==='download')courseLog.add('✓ ファイルをダウンロードしました（ファイルApp →「ダウンロード」）','ok');else if(m==='shared')courseLog.add('✓ ファイルを書き出しました','ok')})};
   // ファイルから読み込む（旧形式も変換して読む）
   $('eLoadFile').onclick=()=>$('eFileIn').click();
   $('eFileIn').onchange=async e=>{const f=e.target.files&&e.target.files[0];e.target.value='';if(!f)return;
     const r=await readCourseText(await f.text(),f.size);if(!r.geo){alert('読み込めませんでした（'+(r.why||'不明')+'）');return}
     if(!confirm('「'+f.name+'」（コース'+courseCount(r.geo)+'件'+(r.status==='salvaged'?'・一部壊れていたため読める部分のみ':'')+(r.from<COURSE_FORMAT?'・旧形式から変換':'')+'）で今の表示を置き換えますか？\n今の版はバックアップに残ります'))return;
-    pushUndo();cancelInteraction();courseGeo=HappoCourses.normalizeCourses(r.geo,{width:COURSE.width});courseBase.fromEdit=true;courseBase.hold=false;editSel=null;vSel=[];hideMenu();drawCourses();save();markers();info();
+    pushUndo();cancelInteraction();courseGeo=withForests(HappoCourses.normalizeCourses(r.geo,{width:COURSE.width}));courseBase.fromEdit=true;courseBase.hold=false;editSel=null;vSel=[];hideMenu();drawCourses();save();markers();info();
     courseLog.add('✓ 「'+f.name+'」から読み込みました','ok')};
   info();
   return {markers,info,cancelInteraction,save,openRecover};
 })():null;
-loadCourses().then(()=>{if(editor){editor.markers();editor.info()}});
+loadCourses().then(()=>{forests.load();if(editor){editor.markers();editor.info()}});
 // Cesiumの地物まとめ描き(Batch)は、表示切替の予約に「もう無い地物」が残ると 's.id' のエラーで描画が止まる。
 // まとめ描きの表示更新の前に、idが無いもの・形がもう無いものを予約から取り除く。
 function guardBatchProto(proto){if(!proto||proto.__happoGuard||typeof proto.updateShows!=='function')return;const orig=proto.updateShows;
@@ -1417,169 +1425,39 @@ showObj3dInfo();
 // 編集モード：駅舎の箱をドラッグすると地表に沿って動く（ワイヤーも追従）。位置は端末に保存し、lifts3d書き出しに含まれる
 if(EDIT){obj3dLog.add('編集モード：リフトをタップで選択。起点・終点（駅舎の箱）をドラッグで移動、線をドラッグでリフトごと移動');obj3dLog.add('編集モード中は軽くするため支柱を表示しません（選択中のリフトだけ表示）。建物は初期は非表示で、チェックすると表示します')}
 (async()=>{await loadObj3d('lifts');await loadObj3d('buildings')})();
-// ===== 林と開けた斜面の描き分け =====
-// コースのポリゴンの内側だけ、航空写真をブラウザで読み、画素ごとの「暗さ」と「模様の細かさ（周囲との明るさのばらつき）」を測ってマスクを作る（外側は判定も表示もしない）。
-// 林かどうかのしきい値はシェーダーで比べるので、スライダーを動かすとすぐ反映される（測り直し不要）。
-// 開けた場所＝コースと同じ雪表現、林＝白を半透明に重ねて航空写真を明るく白っぽくする。さらにカメラの近く(既定500m)の林には雪をかぶった針葉樹の3Dモデルを立てる。
-// 保存：端末(IndexedDB)に自動保存。「PNG書き出し」で forest-mask.png（R=暗さ・G=模様・B=塗り直し 0/128林/255開けた）を保存し、cesium/data/ に置くと次回それを読む。
-const idb={open(){return new Promise((res,rej)=>{const r=indexedDB.open('happo3d',1);r.onupgradeneeded=()=>r.result.createObjectStore('kv');r.onsuccess=()=>res(r.result);r.onerror=()=>rej(r.error)})},
-  async get(k){const db=await this.open();return new Promise((res,rej)=>{const q=db.transaction('kv').objectStore('kv').get(k);q.onsuccess=()=>res(q.result);q.onerror=()=>rej(q.error)})},
-  async set(k,v){const db=await this.open();return new Promise((res,rej)=>{const t=db.transaction('kv','readwrite');t.objectStore('kv').put(v,k);t.oncomplete=()=>res(true);t.onerror=()=>rej(t.error)})}};
-function saveBlobFile(blob,name){const file=new File([blob],name,{type:blob.type||'application/octet-stream'});
-  try{if(navigator.canShare&&navigator.share&&navigator.canShare({files:[file]}))return navigator.share({files:[file],title:name}).then(()=>'shared',e=>e&&e.name==='AbortError'?'cancel':dl())}catch(e){}
-  return Promise.resolve(dl());
-  function dl(){const a=document.createElement('a');a.href=URL.createObjectURL(file);a.download=name;document.body.appendChild(a);a.click();setTimeout(()=>{URL.revokeObjectURL(a.href);a.remove()},5000);return 'download'}}
-const forest=(()=>{
-  const S=SETTINGS,Z=S.forestZoom,F=S.forestDown,N=1<<Z;
-  const lon2x=lon=>(lon+180)/360*N,lat2y=lat=>{const r=lat*Math.PI/180;return (1-Math.log(Math.tan(r)+1/Math.cos(r))/Math.PI)/2*N};
-  const xs=KML_RING.map(q=>q[0]),ys=KML_RING.map(q=>q[1]),mg=0.001;
-  const x0=Math.floor(lon2x(Math.min(...xs)-mg)),x1=Math.floor(lon2x(Math.max(...xs)+mg)),y0=Math.floor(lat2y(Math.max(...ys)+mg)),y1=Math.floor(lat2y(Math.min(...ys)-mg));
-  const nx=x1-x0+1,ny=y1-y0+1,W=nx*256/F,H=ny*256/F;  // マスクの大きさ（画素）
-  const toPx=(lon,lat)=>[(lon2x(lon)-x0)*256/F,(lat2y(lat)-y0)*256/F];
-  const mPerPx=156543.03*Math.cos(36.7*Math.PI/180)/N*F;
-  const st=(()=>{let v=null;try{v=JSON.parse(localStorage.getItem('happoForest')||'null')}catch(e){}v=v||{};return {on:v.on!==false,dark:isFinite(v.dark)?v.dark:S.forestDark,tex:isFinite(v.tex)?v.tex:S.forestTexture,alpha:isFinite(v.alpha)?v.alpha:S.forestAlpha,brush:isFinite(v.brush)?v.brush:S.forestBrush,treeOn:v.treeOn!==false,treeDen:isFinite(v.treeDen)?v.treeDen:S.treeDensity,treeDist:isFinite(v.treeDist)?v.treeDist:S.treeDistance}})();
-  const keep=()=>{try{localStorage.setItem('happoForest',JSON.stringify(st))}catch(e){}};
-  let data=null,material=null,prim=null,tex={},paintMode='',saveT=0,src='',courseMask=null;
-  // --- パネル ---
+// ===== 林（編集モードで手で描いたポリゴン）と雪をかぶった針葉樹の3Dモデル =====
+// 林のポリゴンはコースと同じ道具で編集し（kind=forest）、localStorage(happoForestsEdit)に自動保存。「林を書き出す」で forests.geojson。cesium/data/ に置くと次回それを読む。
+// 遠くからは林の範囲を白っぽく塗るだけ。カメラの近く（既定400m）だけ、林の中に木の3Dモデルを並べる。
+// 1本の木の形を大きさ・向き・色の濃さ（4段階）だけ変えて使い回し、色の濃さごとに1つの形状へまとめて1つのPrimitiveで描く。
+const forests=(()=>{
+  const S=SETTINGS,KEY='happoForestsEdit',FILE='data/forests.geojson';
+  const st=(()=>{let v=null;try{v=JSON.parse(localStorage.getItem('happoTrees')||'null')}catch(e){}v=v||{};return {on:v.on!==false,dist:isFinite(v.dist)?v.dist:S.treeDistance}})();
+  const keep=()=>{try{localStorage.setItem('happoTrees',JSON.stringify(st))}catch(e){}};
   const row=document.createElement('div');row.id='forestRow';
-  row.innerHTML='<div><label><input type="checkbox" id="fOn">林と開けた斜面を描き分け</label></div>'+
-    '<div class="fs">林の判定・暗さ <input type="range" id="fDark" min="0.3" max="0.9" step="0.01"> <span id="fDarkV"></span></div>'+
-    '<div class="fs">林の判定・模様 <input type="range" id="fTex" min="0" max="0.6" step="0.01"> <span id="fTexV"></span></div>'+
-    '<div class="fs">林の白さ <input type="range" id="fAlpha" min="0" max="0.9" step="0.05"></div>'+
-    '<div><label><input type="checkbox" id="tOn">3Dの木</label> 密度 <input type="range" id="tDen" min="1" max="10" step="1"> <span id="tDenV"></span></div>'+
-    '<div class="fs">木の表示距離 <input type="range" id="tDist" min="100" max="1000" step="50"> <span id="tDistV"></span></div>'+
-    '<div id="tInfo"></div>'+
-    '<div id="fInfo">林の判定：未読み込み</div>'+
-    '<div><button id="fRun">航空写真から判定し直す</button><button id="fExport">判定結果をPNG書き出し</button></div>'+
-    (EDIT?'<div class="fp">塗り直し：<button data-m="forest">林にする</button><button data-m="open">開けた場所にする</button><button data-m="erase">塗りを消す</button><button data-m="">やめる</button> 筆 <input type="range" id="fBrush" min="5" max="60" step="5">m</div>':'');
+  row.innerHTML='<div><label><input type="checkbox" id="tOn">林の3Dの木</label> 表示距離 <input type="range" id="tDist" min="100" max="1000" step="50"> <span id="tDistV"></span></div>'+
+    '<div id="fInfo">林：読み込み中…</div><div id="tInfo"></div><div><button id="fExport">林を書き出す</button></div>';
   document.getElementById('courseRow').after(row);
-  const $f=id=>document.getElementById(id),info=t=>{$f('fInfo').textContent=t};
-  $f('fOn').checked=st.on;$f('fDark').value=st.dark;$f('fTex').value=st.tex;$f('fAlpha').value=st.alpha;if(EDIT)$f('fBrush').value=st.brush;
-  $f('tOn').checked=st.treeOn;$f('tDen').value=st.treeDen;$f('tDist').value=st.treeDist;
-  const showV=()=>{$f('fDarkV').textContent=Math.round(st.dark*100);$f('fTexV').textContent=Math.round(st.tex*100);$f('tDenV').textContent='間隔約'+Math.round(24/st.treeDen)+'m';$f('tDistV').textContent=st.treeDist+'m'};showV();
-  const setU=()=>{if(material){const u=material.uniforms;u.tDark=st.dark;u.tTex=st.tex;u.fAlpha=st.alpha;u.snowA=snowState.alpha}const on=st.on&&!!data&&!!prim;if(prim)prim.show=on;snowLayer.setSuppressed(on);scene.requestRender()};
-  $f('fOn').onchange=()=>{st.on=$f('fOn').checked;keep();if(st.on&&!data)load(true);setU();trees.dirty()};
-  $f('fDark').oninput=()=>{st.dark=+$f('fDark').value;keep();showV();setU();trees.dirty()};
-  $f('fTex').oninput=()=>{st.tex=+$f('fTex').value;keep();showV();setU();trees.dirty()};
-  $f('tOn').onchange=()=>{st.treeOn=$f('tOn').checked;keep();trees.dirty()};
-  $f('tDen').oninput=()=>{st.treeDen=+$f('tDen').value;keep();showV();trees.dirty()};
-  $f('tDist').oninput=()=>{st.treeDist=+$f('tDist').value;keep();showV();trees.dirty()};
-  $f('fAlpha').oninput=()=>{st.alpha=+$f('fAlpha').value;keep();setU()};
-  document.getElementById('snowAlpha').addEventListener('input',setU);
-  // --- 航空写真から判定 ---
-  // コースのポリゴンをマスクの画素に塗る（1＝コースの内側）
-  function rasterCourses(){const cv=document.createElement('canvas');cv.width=W;cv.height=H;const c=cv.getContext('2d');c.fillStyle='#fff';
-    for(const f of courseGeo.features||[]){if(!f||!f.properties||f.properties.kind!=='course'||!f.geometry||f.geometry.type!=='Polygon')continue;c.beginPath();
-      for(const r of f.geometry.coordinates){r.forEach((q,i)=>{const [px,py]=toPx(q[0],q[1]);i?c.lineTo(px,py):c.moveTo(px,py)});c.closePath()}c.fill('evenodd')}
-    const d=c.getImageData(0,0,W,H).data,m=new Uint8Array(W*H);for(let k=0;k<W*H;k++)m[k]=d[k*4]>127?1:0;return m}
-  async function classify(){
-    courseMask=rasterCourses();const TP=256/F;  // 1枚の写真がマスク上で占める画素数
-    const need=new Uint8Array(nx*ny);for(let y=0;y<H;y++)for(let x=0;x<W;x++)if(courseMask[y*W+x])need[Math.floor(y/TP)*nx+Math.floor(x/TP)]=1;
-    const jobs=[];for(let ty=0;ty<ny;ty++)for(let tx=0;tx<nx;tx++){let n=0;for(let j=-1;j<=1;j++)for(let i=-1;i<=1;i++){const a=tx+i,b=ty+j;if(a>=0&&b>=0&&a<nx&&b<ny&&need[b*nx+a])n=1}if(n)jobs.push([tx,ty])}  // コースを含む写真（とその隣：境目の判定用）だけ読む
-    if(!jobs.length)throw new Error('コースが無いため判定できません');
-    const cv=document.createElement('canvas');cv.width=nx*256;cv.height=ny*256;const ctx=cv.getContext('2d');let done=0,fail=0;const total=jobs.length;
-    const load1=([tx,ty])=>new Promise(res=>{const im=new Image();im.crossOrigin='anonymous';
-      im.onload=()=>{ctx.drawImage(im,tx*256,ty*256);done++;info('林の判定：航空写真を読み込み中 '+done+'/'+total);res()};
-      im.onerror=()=>{fail++;done++;res()};im.src='https://cyberjapandata.gsi.go.jp/xyz/seamlessphoto/'+Z+'/'+(x0+tx)+'/'+(y0+ty)+'.jpg'});
-    let i=0;await Promise.all(Array.from({length:8},async()=>{while(i<jobs.length)await load1(jobs[i++])}));
-    if(fail===total)throw new Error('航空写真を1枚も読めませんでした（通信を確認してください）');
-    info('林の判定：計算中…');await new Promise(r=>setTimeout(r,30));
-    let img;try{img=ctx.getImageData(0,0,cv.width,cv.height).data}catch(e){throw new Error('航空写真の画素を読めません（CORS）')}
-    const CW=cv.width,L=new Float32Array(W*H),Q=new Float32Array(W*H);  // まとめた画素ごとの明るさの平均と2乗平均（元の細かいざらつきも残す）
-    for(let y=0;y<H;y++)for(let x=0;x<W;x++){let s=0,s2=0;for(let j=0;j<F;j++)for(let k=0;k<F;k++){const o=((y*F+j)*CW+(x*F+k))*4,v=img[o]*0.3+img[o+1]*0.59+img[o+2]*0.11;s+=v;s2+=v*v}L[y*W+x]=s/(F*F);Q[y*W+x]=s2/(F*F)}
-    const I=new Float64Array((W+1)*(H+1)),I2=new Float64Array((W+1)*(H+1));  // 積分画像で周囲の平均・ばらつきを速く求める
-    for(let y=0;y<H;y++){let a=0,b=0;for(let x=0;x<W;x++){const v=L[y*W+x];a+=v;b+=Q[y*W+x];I[(y+1)*(W+1)+x+1]=I[y*(W+1)+x+1]+a;I2[(y+1)*(W+1)+x+1]=I2[y*(W+1)+x+1]+b}}
-    const R=S.forestWindow,dark=new Uint8Array(W*H),tx_=new Uint8Array(W*H);
-    for(let y=0;y<H;y++){const ya=Math.max(0,y-R),yb=Math.min(H,y+R+1);for(let x=0;x<W;x++){const xa=Math.max(0,x-R),xb=Math.min(W,x+R+1),n=(yb-ya)*(xb-xa),
-      s=I[yb*(W+1)+xb]-I[ya*(W+1)+xb]-I[yb*(W+1)+xa]+I[ya*(W+1)+xa],s2=I2[yb*(W+1)+xb]-I2[ya*(W+1)+xb]-I2[yb*(W+1)+xa]+I2[ya*(W+1)+xa],m=s/n,sd=Math.sqrt(Math.max(0,s2/n-m*m));
-      if(!courseMask[y*W+x])continue;dark[y*W+x]=Math.max(0,Math.min(255,255-m));tx_[y*W+x]=Math.max(0,Math.min(255,sd*4))}}  // コースの外は判定しない
-    return {dark,tex:tx_,paint:new Uint8Array(W*H),failTiles:fail,tiles:total}}
-  // --- テクスチャ ---
-  const sampler=()=>new Cesium.Sampler({wrapS:Cesium.TextureWrap.CLAMP_TO_EDGE,wrapT:Cesium.TextureWrap.CLAMP_TO_EDGE,minificationFilter:Cesium.TextureMinificationFilter.LINEAR,magnificationFilter:Cesium.TextureMagnificationFilter.LINEAR});
-  const mkTex=arr=>new Cesium.Texture({context:scene.context,width:W,height:H,pixelFormat:Cesium.PixelFormat.RGBA,pixelDatatype:Cesium.PixelDatatype.UNSIGNED_BYTE,flipY:false,sampler:sampler(),source:{width:W,height:H,arrayBufferView:arr}});
-  function autoRGBA(){const a=new Uint8Array(W*H*4);for(let k=0;k<W*H;k++){a[k*4]=data.dark[k];a[k*4+1]=data.tex[k];a[k*4+3]=255}return a}
-  function paintRGBA(x,y,w,h){const a=new Uint8Array(w*h*4);for(let j=0;j<h;j++)for(let i=0;i<w;i++){const c=data.paint[(y+j)*W+x+i],o=(j*w+i)*4;a[o]=c===2?255:0;a[o+1]=c===1?255:0;a[o+3]=255}return a}
-  // --- 描画（管理区域全体を1つのPrimitive）---
-  function uvMap(){const sh=snowLayer.shared,frame=Cesium.Transforms.eastNorthUpToFixedFrame(sh.center),uvOf=(e,n)=>{const p=Cesium.Matrix4.multiplyByPoint(frame,new Cesium.Cartesian3(e,n,0),new Cesium.Cartesian3()),c=Cesium.Cartographic.fromCartesian(p),[px,py]=toPx(Cesium.Math.toDegrees(c.longitude),Cesium.Math.toDegrees(c.latitude));return [px/W,py/H]};
-    const o=uvOf(0,0),e=uvOf(1000,0),n=uvOf(0,1000);return {uvO:new Cesium.Cartesian2(o[0],o[1]),uvM:new Cesium.Cartesian4((e[0]-o[0])/1000,(e[1]-o[1])/1000,(n[0]-o[0])/1000,(n[1]-o[1])/1000)}}
-  const ph=()=>{const c=document.createElement('canvas');c.width=c.height=1;return c};  // Textureの仮置き
-  function build(){if(prim){scene.groundPrimitives.remove(prim);prim=null}if(!data)return;
-    const feats=(courseGeo.features||[]).filter(f=>f&&f.properties&&f.properties.kind==='course'&&f.geometry&&f.geometry.type==='Polygon');if(!feats.length){setU();return}
-    if(!tex.auto||tex.auto.isDestroyed())tex.auto=mkTex(autoRGBA());if(!tex.paint||tex.paint.isDestroyed())tex.paint=mkTex(paintRGBA(0,0,W,H));
-    const sh=snowLayer.shared,m=uvMap();
-    material=new Cesium.Material({translucent:true,fabric:{type:'HappoForest',
-      uniforms:{autoTex:ph(),paintTex:ph(),image:sh.noise(),uvO:m.uvO,uvM:m.uvM,tDark:st.dark,tTex:st.tex,fAlpha:st.alpha,snowA:snowState.alpha,
-        snowCol:Cesium.Color.clone(sh.col),camOff:new Cesium.Cartesian3(),enu:sh.enuArr,tile:S.snowNoiseMeters,shadeMin:S.snowShadeMin,shadeK:S.snowShadeStrength,upWC:sh.upWC},
-      source:`czm_material czm_getMaterial(czm_materialInput materialInput){
-        czm_material m=czm_getDefaultMaterial(materialInput);
-        vec3 rel=czm_inverseViewRotation*(-materialInput.positionToEyeEC)+camOff;vec2 p=(enu*rel).xy;   // 東・北方向の座標(m)
-        vec2 uv=uvO+vec2(uvM.x*p.x+uvM.z*p.y,uvM.y*p.x+uvM.w*p.y);                                  // マスク上の位置
-        vec4 a=texture(autoTex,uv),e=texture(paintTex,uv);
-        float f=smoothstep(tDark-0.03,tDark+0.03,a.r)*smoothstep(tTex-0.03,tTex+0.03,a.g);         // 暗くて模様が細かい＝林
-        f=mix(f,1.0,e.g);f=mix(f,0.0,e.r);                                                          // 塗り直しを優先
-        float g=texture(image,fract(p/tile)).r,mt=texture(image,fract(p/(tile*7.3)+0.37)).g,cl=texture(image,fract(p/(tile*2.1)+0.71)).r;
-        vec3 nEC=normalize(materialInput.normalEC);if(dot(nEC,materialInput.positionToEyeEC)<0.0)nEC=-nEC;
-        float lit=clamp(dot(nEC,czm_lightDirectionEC),0.0,1.0),litFlat=clamp(dot(normalize(czm_viewRotation*upWC),czm_lightDirectionEC),0.0,1.0);
-        float shade=clamp(1.0+shadeK*(lit-litFlat),shadeMin,1.08);
-        vec3 openC=snowCol.rgb*(0.88+0.12*g+0.08*(mt-0.5))*shade;                                  // 開けた場所：コースと同じ雪
-        vec3 forestC=vec3(0.97,0.98,1.0)*(0.84+0.22*cl)*shade;                                       // 林：枝に積もった雪のまだら
-        float forestA=fAlpha*(0.65+0.7*cl);
-        m.diffuse=mix(openC,forestC,f);m.alpha=mix(snowA,forestA,f);                                 // コースの中だけを描く（形がコースのポリゴン）
-        if(uv.x<0.0||uv.y<0.0||uv.x>1.0||uv.y>1.0)m.alpha=0.0;
-        return m;}`}});
-    material.uniforms.autoTex=tex.auto;material.uniforms.paintTex=tex.paint;  // 作成後にTextureへ差し替える（作成時はCanvasでないと型が判定されない）
-    const deg=c=>Cesium.Cartesian3.fromDegreesArray(c.flat()),inst=[];
-    for(const f of feats){const r=f.geometry.coordinates;try{inst.push(new Cesium.GeometryInstance({geometry:new Cesium.PolygonGeometry({polygonHierarchy:new Cesium.PolygonHierarchy(deg(r[0]),r.slice(1).map(h=>new Cesium.PolygonHierarchy(deg(h)))),vertexFormat:Cesium.MaterialAppearance.MaterialSupport.TEXTURED.vertexFormat})}))}catch(e){}}
-    prim=scene.groundPrimitives.add(new Cesium.GroundPrimitive({geometryInstances:inst,
-      classificationType:Cesium.ClassificationType.TERRAIN,asynchronous:true,allowPicking:false,appearance:new Cesium.MaterialAppearance({material,flat:true,translucent:true})}));
-    scene.groundPrimitives.lowerToBottom(prim);setU();
-    let n=0;const tick=()=>{if(!prim)return;if(prim.ready){scene.requestRender();return}if(++n<200){scene.requestRender();setTimeout(tick,100)}};tick()}
-  scene.preRender.addEventListener(()=>{if(material&&prim&&prim.show)Cesium.Cartesian3.subtract(camera.positionWC,snowLayer.shared.center,material.uniforms.camOff)});
-  snowLayer.onSwap=()=>{if(prim)scene.groundPrimitives.lowerToBottom(prim)};  // 林のレイヤーはコースの雪より下
-  let cT=0;snowLayer.onCourses=()=>{if(!data)return;clearTimeout(cT);cT=setTimeout(()=>{courseMask=rasterCourses();build();trees.dirty()},400)};  // コースを編集したら形を作り直す（新しく広げた所は「判定し直す」で判定）
-  // --- 保存・読み込み ---
-  const valid=d=>d&&d.v===2&&d.w===W&&d.h===H&&d.z===Z&&d.x0===x0&&d.y0===y0&&d.dark&&d.dark.length===W*H;
-  async function saveLocal(){try{await idb.set('forestMask',{v:2,z:Z,x0,y0,w:W,h:H,dark:data.dark,tex:data.tex,paint:data.paint,saved:new Date().toISOString()});return true}catch(e){return false}}
-  async function fromPng(url){const r=await fetch(url,{cache:'no-cache'});if(!r.ok)return null;const bmp=await createImageBitmap(await r.blob());if(bmp.width!==W||bmp.height!==H)throw new Error('大きさが合わない（'+bmp.width+'×'+bmp.height+'、必要 '+W+'×'+H+'）');
-    const cv=document.createElement('canvas');cv.width=W;cv.height=H;const c=cv.getContext('2d');c.drawImage(bmp,0,0);const d=c.getImageData(0,0,W,H).data,dark=new Uint8Array(W*H),t=new Uint8Array(W*H),p=new Uint8Array(W*H);
-    for(let k=0;k<W*H;k++){dark[k]=d[k*4];t[k]=d[k*4+1];const b=d[k*4+2];p[k]=b>192?2:b>64?1:0}return {dark,tex:t,paint:p}}
-  const forestAt=k=>{const p=data.paint[k];if(p===1)return true;if(p===2)return false;return data.dark[k]/255>st.dark&&data.tex[k]/255>st.tex};  // シェーダーと同じ判定
-  async function load(allowRun){
-    try{const cands=EDIT?['device','file']:['file','device'];
-      for(const c of cands){
-        if(c==='device'){const d=await idb.get('forestMask').catch(()=>null);if(valid(d)){data={dark:d.dark,tex:d.tex,paint:d.paint};src='端末に保存した判定結果';break}}
-        else{try{const d=await fromPng('data/forest-mask.png');if(d){data=d;src='forest-mask.png';break}}catch(e){info('林の判定：forest-mask.png を使えません（'+e.message+'）')}}}
-      if(!data&&allowRun){await run();return}
-      if(data){courseMask=rasterCourses();build();trees.dirty();info('林の判定：'+src+'（'+W+'×'+H+'画素・約'+mPerPx.toFixed(1)+'m・コースの内側のみ）')}}
-    catch(e){info('✗ 林の判定：'+e.message)}}
-  async function run(){try{const d=await classify();data=d;src='航空写真から判定';for(const k of ['auto','paint'])if(tex[k]&&!tex[k].isDestroyed()){tex[k].destroy();tex[k]=null}await saveLocal();build();trees.dirty();info('林の判定：コースの内側を航空写真から判定しました（写真'+d.tiles+'枚・約'+mPerPx.toFixed(1)+'m'+(d.failTiles?'・読めなかった写真'+d.failTiles+'枚':'')+'）。端末に保存済み')}
-    catch(e){info('✗ 林の判定：'+e.message)}}
-  $f('fRun').onclick=()=>{if(data&&!confirm('航空写真から判定し直しますか？（塗り直した部分は消えます）'))return;data=null;run()};
-  $f('fExport').onclick=()=>{if(!data){alert('まだ判定結果がありません');return}const cv=document.createElement('canvas');cv.width=W;cv.height=H;const c=cv.getContext('2d'),im=c.createImageData(W,H);
-    for(let k=0;k<W*H;k++){im.data[k*4]=data.dark[k];im.data[k*4+1]=data.tex[k];im.data[k*4+2]=data.paint[k]===2?255:data.paint[k]===1?128:0;im.data[k*4+3]=255}
-    c.putImageData(im,0,0);cv.toBlob(b=>saveBlobFile(b,'forest-mask.png'),'image/png')};
-  // --- 編集モード：塗り直し（1本指でなぞる。地図は動かない）---
-  if(EDIT){const cv=scene.canvas;let stroke=null,raf=0;
-    row.querySelectorAll('.fp button').forEach(b=>b.onclick=()=>{paintMode=b.dataset.m;row.querySelectorAll('.fp button').forEach(x=>x.classList.toggle('on',x===b&&!!paintMode));
-      info(paintMode?'塗り直し中：画面を1本指でなぞってください（2本指で地図操作）':'林の判定：'+src)});
-    $f('fBrush').oninput=()=>{st.brush=+$f('fBrush').value;keep()};
-    const ground=e=>{const r=cv.getBoundingClientRect(),w=new Cesium.Cartesian2(e.clientX-r.left,e.clientY-r.top),ray=camera.getPickRay(w),g=ray&&globe.pick(ray,scene);if(!g)return null;const c=Cesium.Cartographic.fromCartesian(g);return toPx(Cesium.Math.toDegrees(c.longitude),Cesium.Math.toDegrees(c.latitude))};
-    function dab(px,py,box){const r=st.brush/mPerPx,code=paintMode==='forest'?1:paintMode==='open'?2:0,xa=Math.max(0,Math.floor(px-r)),xb=Math.min(W-1,Math.ceil(px+r)),ya=Math.max(0,Math.floor(py-r)),yb=Math.min(H-1,Math.ceil(py+r));
-      for(let y=ya;y<=yb;y++)for(let x=xa;x<=xb;x++)if((x-px)**2+(y-py)**2<=r*r)data.paint[y*W+x]=code;
-      box.xa=Math.min(box.xa,xa);box.xb=Math.max(box.xb,xb);box.ya=Math.min(box.ya,ya);box.yb=Math.max(box.yb,yb)}
-    function flush(){raf=0;if(!stroke||!stroke.box||stroke.box.xb<stroke.box.xa)return;const b=stroke.box,w=b.xb-b.xa+1,h=b.yb-b.ya+1;
-      tex.paint.copyFrom({source:{width:w,height:h,arrayBufferView:paintRGBA(b.xa,b.ya,w,h)},xOffset:b.xa,yOffset:b.ya});stroke.box={xa:1e9,xb:-1,ya:1e9,yb:-1};scene.requestRender();trees.dirty()}
-    function to(e){const q=ground(e);if(!q)return;const lp=stroke.last||q,d=Math.hypot(q[0]-lp[0],q[1]-lp[1]),step=Math.max(1,st.brush/mPerPx/2),n=Math.ceil(d/step);
-      for(let i=1;i<=n||i===1;i++){const t=n?i/n:1;dab(lp[0]+(q[0]-lp[0])*t,lp[1]+(q[1]-lp[1])*t,stroke.box);if(!n)break}stroke.last=q;if(!raf)raf=requestAnimationFrame(flush)}  // 指の動きの間も途切れないよう補間して塗る
-    // コース編集や地図操作より先に受ける（documentの捕捉段階）
-    document.addEventListener('pointerdown',e=>{if(!paintMode||e.target!==cv||!data||!tex.paint||stroke)return;e.stopPropagation();stroke={id:e.pointerId,last:null,box:{xa:1e9,xb:-1,ya:1e9,yb:-1}};to(e)},true);
-    document.addEventListener('pointermove',e=>{if(!stroke||e.pointerId!==stroke.id)return;e.stopPropagation();to(e)},true);
-    const up=e=>{if(!stroke||e.pointerId!==stroke.id)return;e.stopPropagation();flush();stroke=null;clearTimeout(saveT);saveT=setTimeout(()=>{saveLocal().then(ok=>info(ok?'塗り直しを端末に保存しました（PNG書き出しでファイルにも保存できます）':'✗ 塗り直しを端末に保存できませんでした'))},800)};
-    document.addEventListener('pointerup',up,true);document.addEventListener('pointercancel',up,true);
-    window.__forestPainting=()=>!!paintMode}
-  // ===== 雪をかぶった針葉樹の3Dモデル =====
-  // 1本の木の形（幹＋三段の円錐）を作り、立てる場所ごとに大きさ・向き・色の濃さ（4段階）を変えて配置する。
-  // 色の濃さごとに全部の木を1つの形状にまとめ、1つのPrimitiveで描く（描画命令は数回）。カメラが動いたら近くだけ立て直す。
+  const $f=id=>document.getElementById(id),info=t=>{$f('fInfo').textContent=t},tInfo=t=>{$f('tInfo').textContent=t};
+  $f('tOn').checked=st.on;$f('tDist').value=st.dist;const showV=()=>{$f('tDistV').textContent=st.dist+'m'};showV();
+  $f('tOn').onchange=()=>{st.on=$f('tOn').checked;keep();trees.dirty()};
+  $f('tDist').oninput=()=>{st.dist=+$f('tDist').value;keep();showV();trees.dirty()};
+  const list=()=>(courseGeo.features||[]).filter(isForest);
+  const okRing=r=>Array.isArray(r)&&r.length>=4&&r.every(q=>Array.isArray(q)&&isFinite(q[0])&&isFinite(q[1]));
+  function clean(g){return ((g&&g.features)||[]).filter(f=>f&&f.geometry&&f.geometry.type==='Polygon'&&Array.isArray(f.geometry.coordinates)&&f.geometry.coordinates.every(okRing)).map((f,i)=>({type:'Feature',
+    properties:Object.assign({name:'林'},f.properties||{},{kind:'forest',id:(f.properties&&f.properties.id)||('forest/f'+i),density:Math.max(1,Math.min(10,+((f.properties||{}).density)||S.treeDensity))}),geometry:{type:'Polygon',coordinates:f.geometry.coordinates}}))}
+  function attach(fs,src){courseGeo.features=(courseGeo.features||[]).filter(f=>!isForest(f)).concat(fs);
+    for(const f of fs)addCourseFeature(f);scene.requestRender();mini.request();info('林：'+fs.length+'か所（'+src+'）');trees.dirty()}
+  async function load(){let fs=null,src='';
+    for(const c of EDIT?['ls','file']:['file','ls']){
+      if(c==='ls'){const v=lsGet(KEY);if(v&&Array.isArray(v.features)){fs=clean(v);src='端末で編集中のデータ';break}}
+      else{try{const r=await fetch(FILE,{cache:'no-cache'});if(r.ok){fs=clean(await r.json());src='forests.geojson';break}}catch(e){}}}
+    attach(fs||[],fs?src:'まだありません。編集モードの「林を描く」で作れます')}
+  function save(){const fs=list().map(f=>JSON.parse(JSON.stringify(f,(k,v)=>k.startsWith('__')?undefined:v)));
+    const ok=lsSet(KEY,{type:'FeatureCollection',properties:{note:'林の範囲（kind=forest、density=木の密度1〜10）',edited:new Date().toISOString()},features:fs});
+    info(ok?'林：'+fs.length+'か所（端末に自動保存済み）':'✗ 林を端末に保存できませんでした（容量不足）');trees.dirty();return ok}
+  $f('fExport').onclick=()=>{const fs=list().map(f=>JSON.parse(JSON.stringify(f,(k,v)=>k.startsWith('__')?undefined:v)));
+    saveAsFile({type:'FeatureCollection',properties:{note:'林の範囲（kind=forest、density=木の密度1〜10）',exported:new Date().toISOString()},features:fs},'forests.geojson').then(m=>{if(m==='download')info('✓ forests.geojson をダウンロードしました（ファイルApp →「ダウンロード」）')})};
+  // ----- 3Dの木 -----
   const trees=(()=>{
     const SL=8,tpl={p:[],n:[],i:[]};  // 高さ1の木の形（x=東,y=北,z=上）
     function cone(z0,len,rad){const b=tpl.p.length/3;for(let k=0;k<SL;k++){const a=k/SL*2*Math.PI,a2=(k+0.5)/SL*2*Math.PI,L=Math.hypot(len,rad);
@@ -1592,36 +1470,38 @@ const forest=(()=>{
     const trunk={p:[],n:[],i:[]};{const r=0.04;for(let k=0;k<SL;k++){const a=k/SL*2*Math.PI;trunk.p.push(Math.cos(a)*r,Math.sin(a)*r,-0.12,Math.cos(a)*r,Math.sin(a)*r,0.2);trunk.n.push(Math.cos(a),Math.sin(a),0,Math.cos(a),Math.sin(a),0)}
       for(let k=0;k<SL;k++){const a=k*2,b=((k+1)%SL)*2;trunk.i.push(a,b,a+1,b,b+1,a+1)}}
     const SHADES=['#eef3f0','#dce7e1','#c8d8cf','#b2c6bb'].map(c=>Cesium.Color.fromCssColorString(c)),TRUNK=Cesium.Color.fromCssColorString('#5b4636');
+    const LON0=137.81,LAT0=36.69,KX=111320*Math.cos(LAT0*Math.PI/180),KY=110540;  // 木を並べる格子の基準（どの林でも同じ格子なので立て直しても同じ位置）
     let prim=null,next=null,center=null,timer=0,busy=false,again=false;
     const hash=(i,j,k)=>{const v=Math.sin(i*127.1+j*311.7+k*74.7)*43758.5453;return v-Math.floor(v)};
-    const tInfo=t=>{const el=document.getElementById('tInfo');if(el)el.textContent=t};
-    function clear(){for(const q of [prim,next])if(q)scene.primitives.remove(q);prim=next=null;center=null;scene.requestRender()}
+    const inRing=(x,y,r)=>{let ins=false;for(let a=0,b=r.length-1;a<r.length;b=a++){const A=r[a],B=r[b];if((A[1]>y)!==(B[1]>y)&&x<(B[0]-A[0])*(y-A[1])/(B[1]-A[1])+A[0])ins=!ins}return ins};
+    function clear(){for(const q of [prim,next])if(q)scene.primitives.remove(q);prim=next=null;scene.requestRender()}
     function dirty(){center=null;clearTimeout(timer);timer=setTimeout(check,300)}
     async function check(){
-      if(!st.treeOn||!st.on||!data||!courseMask){clear();tInfo(st.treeOn?'':'3Dの木：表示しない');return}
+      const fs=list();if(!st.on||!fs.length){clear();tInfo(st.on?'':'林の3Dの木：表示しない');return}
       const c=camera.positionCartographic,lon=Cesium.Math.toDegrees(c.longitude),lat=Cesium.Math.toDegrees(c.latitude);
-      if(center&&Math.hypot((lon-center[0])*89500,(lat-center[1])*111000)<st.treeDist*0.25)return;  // 少し動いただけなら立て直さない
+      if(center&&Math.hypot((lon-center[0])*KX,(lat-center[1])*KY)<st.dist*0.25)return;  // 少し動いただけなら立て直さない
       if(busy){again=true;return}busy=true;center=[lon,lat];
-      try{await buildAt(lon,lat,c.height)}catch(e){console.error(e);tInfo('✗ 3Dの木：'+(e&&e.message||e))}
-      busy=false;if(again){again=false;check()}}
-    async function buildAt(lon,lat,camH){
-      const g0=await sampleGround(lon,lat),above=Math.max(0,camH-g0),R=st.treeDist;
-      if(above>=R){if(prim||next)clear();tInfo('3Dの木：カメラが高いため表示範囲('+R+'m)に木がありません');return}
-      const rH=Math.sqrt(R*R-above*above),spacing=24/st.treeDen,stepPx=spacing/mPerPx,[cx,cy]=toPx(lon,lat),rPx=rH/mPerPx;
-      const cand=[];const ia=Math.floor((cx-rPx)/stepPx),ib=Math.ceil((cx+rPx)/stepPx),ja=Math.floor((cy-rPx)/stepPx),jb=Math.ceil((cy+rPx)/stepPx);
-      for(let j=ja;j<=jb;j++)for(let i=ia;i<=ib;i++){const px=(i+hash(i,j,1))*stepPx,py=(j+hash(i,j,2))*stepPx,d=Math.hypot(px-cx,py-cy);if(d>rPx)continue;  // 間隔に揺らぎを付けた格子（場所が決まっているので立て直しても同じ位置）
-        const x=Math.floor(px),y=Math.floor(py);if(x<0||y<0||x>=W||y>=H)continue;const k=y*W+x;if(!courseMask[k]||!forestAt(k))continue;cand.push({i,j,px,py,d})}
-      cand.sort((a,b)=>a.d-b.d);const list=cand.slice(0,S.treeMax);
-      if(!list.length){if(prim||next)clear();tInfo('3Dの木：近くに林がありません');return}
-      const toLL=(px,py)=>{const X=px*F/256+x0,Y=py*F/256+y0;return [X/N*360-180,Math.atan(Math.sinh(Math.PI*(1-2*Y/N)))*180/Math.PI]};
-      const pts=list.map(t=>({t,ll:toLL(t.px,t.py)})),hs=await Promise.all(pts.map(o=>sampleGround(o.ll[0],o.ll[1])));
-      // まとめた形状を作る（色の濃さ4段階＋幹）
+      try{await buildAt(fs,lon,lat,c.height)}catch(e){console.error(e);tInfo('✗ 林の3Dの木：'+(e&&e.message||e))}
+      busy=false;if(again){again=false;center=null;check()}}
+    async function buildAt(fs,lon,lat,camH){
+      const g0=await sampleGround(lon,lat),above=Math.max(0,camH-g0),R=st.dist;
+      if(above>=R){clear();tInfo('林の3Dの木：カメラが高いため表示しない（地表から'+R+'m以内で表示）');return}
+      const rH=Math.sqrt(R*R-above*above),cx=(lon-LON0)*KX,cy=(lat-LAT0)*KY,cand=[];
+      for(const f of fs){const r=f.geometry.coordinates[0],holes=f.geometry.coordinates.slice(1),sp=24/(f.properties.density||S.treeDensity);
+        let xa=1e9,xb=-1e9,ya=1e9,yb=-1e9;for(const q of r){const x=(q[0]-LON0)*KX,y=(q[1]-LAT0)*KY;xa=Math.min(xa,x);xb=Math.max(xb,x);ya=Math.min(ya,y);yb=Math.max(yb,y)}
+        xa=Math.max(xa,cx-rH);xb=Math.min(xb,cx+rH);ya=Math.max(ya,cy-rH);yb=Math.min(yb,cy+rH);if(xa>xb||ya>yb)continue;  // カメラの近くにかからない林は飛ばす
+        for(let j=Math.floor(ya/sp);j<=Math.ceil(yb/sp);j++)for(let i=Math.floor(xa/sp);i<=Math.ceil(xb/sp);i++){
+          const x=(i+hash(i,j,sp))*sp,y=(j+hash(j,i,sp+1))*sp,d=Math.hypot(x-cx,y-cy);if(d>rH)continue;  // 間隔に揺らぎを付けた格子
+          const lo=LON0+x/KX,la=LAT0+y/KY;if(!inRing(lo,la,r)||holes.some(h=>inRing(lo,la,h)))continue;cand.push({i,j,lo,la,d})}}
+      cand.sort((a,b)=>a.d-b.d);const pts=cand.slice(0,S.treeMax);
+      if(!pts.length){clear();tInfo('林の3Dの木：近く（'+R+'m以内）に林がありません');return}
+      const hs=await Promise.all(pts.map(o=>sampleGround(o.lo,o.la)));
       const groups=SHADES.map(()=>({p:[],n:[],i:[]})),tr={p:[],n:[],i:[]},[hMin,hMax]=S.treeHeight;
       const put=(G,T,O,e,n_,u,sc,ca,sa,rad)=>{const b=G.p.length/3;for(let v=0;v<T.p.length/3;v++){const lx=T.p[v*3],ly=T.p[v*3+1],lz=T.p[v*3+2],rx=(lx*ca-ly*sa)*rad,ry=(lx*sa+ly*ca)*rad,rz=lz*sc,
           nx_=T.n[v*3]*ca-T.n[v*3+1]*sa,ny_=T.n[v*3]*sa+T.n[v*3+1]*ca,nz_=T.n[v*3+2];
           G.p.push(O.x+e.x*rx+n_.x*ry+u.x*rz,O.y+e.y*rx+n_.y*ry+u.y*rz,O.z+e.z*rx+n_.z*ry+u.z*rz);G.n.push(e.x*nx_+n_.x*ny_+u.x*nz_,e.y*nx_+n_.y*ny_+u.y*nz_,e.z*nx_+n_.z*ny_+u.z*nz_)}
         for(const q of T.i)G.i.push(b+q)};
-      pts.forEach((o,k)=>{const {i,j}=o.t,[lo,la]=o.ll,h=hs[k],sc=hMin+(hMax-hMin)*hash(i,j,3),rad=sc*(0.85+0.3*hash(i,j,4)),ang=hash(i,j,5)*2*Math.PI,ca=Math.cos(ang),sa=Math.sin(ang);
+      pts.forEach((o,k)=>{const {i,j,lo,la}=o,h=hs[k],sc=hMin+(hMax-hMin)*hash(i,j,3),rad=sc*(0.85+0.3*hash(i,j,4)),ang=hash(i,j,5)*2*Math.PI,ca=Math.cos(ang),sa=Math.sin(ang);  // 大きさ・太さ・向き・色の濃さを木ごとに変える
         const L=lo*Math.PI/180,P=la*Math.PI/180,O=Cesium.Cartesian3.fromDegrees(lo,la,h-0.5),e={x:-Math.sin(L),y:Math.cos(L),z:0},n_={x:-Math.sin(P)*Math.cos(L),y:-Math.sin(P)*Math.sin(L),z:Math.cos(P)},u={x:Math.cos(P)*Math.cos(L),y:Math.cos(P)*Math.sin(L),z:Math.sin(P)};
         put(groups[Math.floor(hash(i,j,6)*SHADES.length)%SHADES.length],tpl,O,e,n_,u,sc,ca,sa,rad);put(tr,trunk,O,e,n_,u,sc,ca,sa,rad)});
       const geom=G=>{const pos=new Float64Array(G.p);return new Cesium.Geometry({attributes:{position:new Cesium.GeometryAttribute({componentDatatype:Cesium.ComponentDatatype.DOUBLE,componentsPerAttribute:3,values:pos}),
@@ -1630,13 +1510,12 @@ const forest=(()=>{
       inst.push(new Cesium.GeometryInstance({geometry:geom(tr),attributes:{color:Cesium.ColorGeometryInstanceAttribute.fromColor(TRUNK)}}));
       if(next)scene.primitives.remove(next);
       next=scene.primitives.add(new Cesium.Primitive({geometryInstances:inst,appearance:new Cesium.PerInstanceColorAppearance({flat:false,translucent:false,closed:false}),asynchronous:false,allowPicking:false,compressVertices:false}));  // 太陽光で陰影
-      const n=next;let tries=0;const swap=()=>{if(next!==n)return;if(n.ready||++tries>50){if(prim)scene.primitives.remove(prim);prim=n;next=null;scene.requestRender();return}scene.requestRender();setTimeout(swap,50)};swap();
-      tInfo('3Dの木：'+list.length+'本（カメラから'+R+'m以内'+(cand.length>list.length?'・上限'+S.treeMax+'本':'')+'）')}
+      const n=next;let tries=0;const swap=()=>{if(next!==n)return;if(n.ready||++tries>50){if(prim)scene.primitives.remove(prim);prim=n;next=null;scene.requestRender();return}scene.requestRender();setTimeout(swap,50)};swap();  // 出来てから入れ替える（ちらつかない）
+      tInfo('林の3Dの木：'+pts.length+'本（カメラから'+R+'m以内'+(cand.length>pts.length?'・上限'+S.treeMax+'本':'')+'）')}
     camera.moveEnd.addEventListener(()=>{clearTimeout(timer);timer=setTimeout(check,200)});
-    return {dirty,get count(){return prim?1:0}}})();
-  {const start=()=>setTimeout(()=>{if(st.on)load(true);else load(false)},1500);if(document.readyState==='complete')start();else addEventListener('load',start,{once:true})}  // ページの読み込みが終わってから（写真の読み込みでページの表示を遅らせない）
-  return {get data(){return data},W,H,toPx,st,setU,get material(){return material},trees,get courseMask(){return courseMask}};
-})();  // loadObj3d は失敗しても例外を投げないので、リフトが失敗しても建物は読む
+    return {dirty}})();
+  return {load,save,attach,list,trees,dirty:()=>trees.dirty()};
+})();
 // ===== 視点スティック（左下）=====
 // FPSの右スティックと同じ：左右に倒すとその場で左右に回り、上下に倒すと見上げ・見下ろし。カメラの位置は変えない。
 // 倒している間は一定速度で回り続け、離すと即停止。指ごとに追跡するので、ミニマップなどと同時に操作できる。
