@@ -1484,10 +1484,7 @@ const forests=(()=>{
     const trunk={p:[],n:[],i:[]};{const r=0.04;for(let k=0;k<SL;k++){const a=k/SL*2*Math.PI;trunk.p.push(Math.cos(a)*r,Math.sin(a)*r,-0.12,Math.cos(a)*r,Math.sin(a)*r,0.2);trunk.n.push(Math.cos(a),Math.sin(a),0,Math.cos(a),Math.sin(a),0)}
       for(let k=0;k<SL;k++){const a=k*2,b=((k+1)%SL)*2;trunk.i.push(a,b,a+1,b,b+1,a+1)}}
     const SHADES=['#eef3f0','#dce7e1','#c8d8cf','#b2c6bb'].map(c=>Cesium.Color.fromCssColorString(c)),TRUNK=Cesium.Color.fromCssColorString('#5b4636');
-    // 灌木：高さ1の、背が低くこんもりした丸い形（少しでこぼこさせる）。雪をかぶった白っぽい色
-    const shrub={p:[],n:[],i:[]};{const SA=10,ST=5;for(let t=0;t<=ST;t++){const e=t/ST*Math.PI/2;for(let k=0;k<SA;k++){const a=k/SA*2*Math.PI,bump=1+0.12*Math.cos(3*a+t)+0.06*Math.sin(5*a),rx=0.62*bump,z=Math.sin(e);
-        shrub.p.push(Math.cos(e)*Math.cos(a)*rx,Math.cos(e)*Math.sin(a)*rx,z*0.95+0.02);const nx=Math.cos(e)*Math.cos(a)/rx,ny=Math.cos(e)*Math.sin(a)/rx,nz=Math.sin(e)/0.95,L=Math.hypot(nx,ny,nz);shrub.n.push(nx/L,ny/L,nz/L)}}
-      for(let t=0;t<ST;t++)for(let k=0;k<SA;k++){const a=t*SA+k,b=t*SA+(k+1)%SA,c=(t+1)*SA+k,d=(t+1)*SA+(k+1)%SA;shrub.i.push(a,b,d,a,d,c)}}
+    // 灌木も高木と同じ尖った針葉樹の形（小さく、少し白っぽい色）
     const SHRUB_SHADES=['#f3f7f5','#e3ece7','#d2dfd8'].map(c=>Cesium.Color.fromCssColorString(c));
     const LON0=137.81,LAT0=36.69,KX=111320*Math.cos(LAT0*Math.PI/180),KY=110540;  // 木を並べる格子の基準（どの林でも同じ格子なので立て直しても同じ位置）
     let prim=null,next=null,center=null,timer=0,busy=false,again=false;
@@ -1523,8 +1520,8 @@ const forests=(()=>{
           G.p.push(O.x+e.x*rx+n_.x*ry+u.x*rz,O.y+e.y*rx+n_.y*ry+u.y*rz,O.z+e.z*rx+n_.z*ry+u.z*rz);G.n.push(e.x*nx_+n_.x*ny_+u.x*nz_,e.y*nx_+n_.y*ny_+u.y*nz_,e.z*nx_+n_.z*ny_+u.z*nz_)}
         for(const q of T.i)G.i.push(b+q)};
       const frame=(lo,la,h)=>{const L=lo*Math.PI/180,P=la*Math.PI/180;return {O:Cesium.Cartesian3.fromDegrees(lo,la,h),e:{x:-Math.sin(L),y:Math.cos(L),z:0},n_:{x:-Math.sin(P)*Math.cos(L),y:-Math.sin(P)*Math.sin(L),z:Math.cos(P)},u:{x:Math.cos(P)*Math.cos(L),y:Math.cos(P)*Math.sin(L),z:Math.sin(P)}}};
-      sps.forEach((o,k)=>{const {i,j,lo,la}=o,sc=sMin+(sMax-sMin)*hash(i,j,13),rad=sc*(1.1+0.6*hash(i,j,14)),ang=hash(i,j,15)*2*Math.PI,F=frame(lo,la,hss[k]-0.15);  // 灌木：高さ1〜3m、横に広いこんもりした形
-        put(sgroups[Math.floor(hash(i,j,16)*SHRUB_SHADES.length)%SHRUB_SHADES.length],shrub,F.O,F.e,F.n_,F.u,sc,Math.cos(ang),Math.sin(ang),rad)});
+      sps.forEach((o,k)=>{const {i,j,lo,la}=o,sc=sMin+(sMax-sMin)*hash(i,j,13),rad=sc*(0.5+0.2*hash(i,j,14))/0.6,ang=hash(i,j,15)*2*Math.PI,F=frame(lo,la,hss[k]-0.1);  // 灌木：高さ1〜3mの小さな針葉樹（高木と同じ尖った形。幹は省いて軽く）
+        put(sgroups[Math.floor(hash(i,j,16)*SHRUB_SHADES.length)%SHRUB_SHADES.length],tpl,F.O,F.e,F.n_,F.u,sc,Math.cos(ang),Math.sin(ang),rad)});
       pts.forEach((o,k)=>{const {i,j,lo,la}=o,h=hs[k],sc=hMin+(hMax-hMin)*hash(i,j,3),rad=sc*(wMin+(wMax-wMin)*hash(i,j,4))/0.6,ang=hash(i,j,5)*2*Math.PI,ca=Math.cos(ang),sa=Math.sin(ang);  // 大きさ・太さ・向き・色の濃さを木ごとに変える
         const L=lo*Math.PI/180,P=la*Math.PI/180,O=Cesium.Cartesian3.fromDegrees(lo,la,h-0.5),e={x:-Math.sin(L),y:Math.cos(L),z:0},n_={x:-Math.sin(P)*Math.cos(L),y:-Math.sin(P)*Math.sin(L),z:Math.cos(P)},u={x:Math.cos(P)*Math.cos(L),y:Math.cos(P)*Math.sin(L),z:Math.sin(P)};
         put(groups[Math.floor(hash(i,j,6)*SHADES.length)%SHADES.length],tpl,O,e,n_,u,sc,ca,sa,rad);put(tr,trunk,O,e,n_,u,sc,ca,sa,rad)});
