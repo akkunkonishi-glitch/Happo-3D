@@ -141,10 +141,11 @@ const SETTINGS={
   snowShadeStrength:1.3,// 斜面の向きによる明暗の強さ（0で陰影なし）
   treeDensity:4,     // 新しく描いた林の木の密度の初期値(1〜10)。木の間隔(m)＝24÷密度。林ごとに編集モードで変更できる
   treeDistance:400,  // 3Dの木を立てるカメラからの距離(m)の初期値。これより遠くは林の範囲を白っぽく塗るだけ
-  treeHeight:[10,15],// 高木の高さの範囲(m)
+  treeHeight:[8,12], // 高木の高さの範囲(m)の初期値。パネルのスライダーで微調整できる
   treeWidth:[0.4,0.55],// 高木の太さ（高さに対する一番下の枝の広がり＝直径の倍率）。前より細め
   treeMax:6000,      // 一度に立てる高木の上限（多すぎるときはカメラに近い順）
-  shrubHeight:[1,3], // 灌木の高さの範囲(m)
+  shrubHeight:[3,5], // 灌木の高さの範囲(m)の初期値。パネルのスライダーで微調整できる
+  shrubWidth:[0.5,0.7],// 灌木の太さ（高さに対する一番下の枝の広がり＝直径の倍率）
   shrubDistance:150, // 灌木を表示するカメラからの距離(m)の初期値（数が多いので高木より近くだけ）
   shrubMax:8000,     // 一度に立てる灌木の上限
   forestMix:0.5,     // 「混合」の林の高木の割合の初期値(0〜1)
@@ -1443,16 +1444,22 @@ if(EDIT){obj3dLog.add('編集モード：リフトをタップで選択。起点
 // 1本の木の形を大きさ・向き・色の濃さ（4段階）だけ変えて使い回し、色の濃さごとに1つの形状へまとめて1つのPrimitiveで描く。
 const forests=(()=>{
   const S=SETTINGS,KEY='happoForestsEdit',FILE='data/forests.geojson';
-  const st=(()=>{let v=null;try{v=JSON.parse(localStorage.getItem('happoTrees')||'null')}catch(e){}v=v||{};return {on:v.on!==false,dist:isFinite(v.dist)?v.dist:S.treeDistance,sdist:isFinite(v.sdist)?v.sdist:S.shrubDistance}})();
+  const st=(()=>{let v=null;try{v=JSON.parse(localStorage.getItem('happoTrees')||'null')}catch(e){}v=v||{};const pair=(a,d)=>Array.isArray(a)&&a.length===2&&a.every(isFinite)?a:d.slice();return {on:v.on!==false,dist:isFinite(v.dist)?v.dist:S.treeDistance,sdist:isFinite(v.sdist)?v.sdist:S.shrubDistance,th:pair(v.th,S.treeHeight),sh:pair(v.sh,S.shrubHeight)}})();
   const keep=()=>{try{localStorage.setItem('happoTrees',JSON.stringify(st))}catch(e){}};
   const row=document.createElement('div');row.id='forestRow';
   row.innerHTML='<div><label><input type="checkbox" id="tOn">林の3Dの木</label> 高木の表示距離 <input type="range" id="tDist" min="100" max="1000" step="50"> <span id="tDistV"></span></div>'+
     '<div class="fs">灌木の表示距離 <input type="range" id="tSDist" min="50" max="400" step="25"> <span id="tSDistV"></span></div>'+
+    '<div class="fs">高木の高さ 最低 <input type="range" id="tHmin" min="3" max="25" step="0.5"> 最高 <input type="range" id="tHmax" min="3" max="25" step="0.5"> <span id="tHV"></span></div>'+
+    '<div class="fs">灌木の高さ 最低 <input type="range" id="tSmin" min="0.5" max="10" step="0.5"> 最高 <input type="range" id="tSmax" min="0.5" max="10" step="0.5"> <span id="tSV"></span></div>'+
     '<div id="fInfo">林：読み込み中…</div><div id="tInfo"></div><div><button id="fExport">林を書き出す</button></div>';
   document.getElementById('courseRow').after(row);
   const $f=id=>document.getElementById(id),info=t=>{$f('fInfo').textContent=t},tInfo=t=>{$f('tInfo').textContent=t};
   $f('tOn').checked=st.on;$f('tDist').value=st.dist;$f('tSDist').value=st.sdist;const showV=()=>{$f('tDistV').textContent=st.dist+'m';$f('tSDistV').textContent=st.sdist+'m'};showV();
   $f('tSDist').oninput=()=>{st.sdist=+$f('tSDist').value;keep();showV();trees.dirty()};
+  // 木の高さ（幅は高さ×太さの比率なので、高さを変えても形の比率は保たれる）
+  const showH=()=>{$f('tHmin').value=st.th[0];$f('tHmax').value=st.th[1];$f('tSmin').value=st.sh[0];$f('tSmax').value=st.sh[1];$f('tHV').textContent=st.th[0]+'〜'+st.th[1]+'m';$f('tSV').textContent=st.sh[0]+'〜'+st.sh[1]+'m'};showH();
+  const hSlider=(id,key,idx)=>{$f(id).oninput=()=>{const v=+$f(id).value,a=st[key];a[idx]=v;if(a[0]>a[1])a[1-idx]=v;keep();showH();trees.dirty()}};  // 最低が最高を超えたらそろえる
+  hSlider('tHmin','th',0);hSlider('tHmax','th',1);hSlider('tSmin','sh',0);hSlider('tSmax','sh',1);
   $f('tOn').onchange=()=>{st.on=$f('tOn').checked;keep();trees.dirty()};
   $f('tDist').oninput=()=>{st.dist=+$f('tDist').value;keep();showV();trees.dirty()};
   const list=()=>(courseGeo.features||[]).filter(isForest);
@@ -1514,13 +1521,13 @@ const forests=(()=>{
       cand.sort((a,b)=>a.d-b.d);sh.sort((a,b)=>a.d-b.d);const pts=cand.slice(0,S.treeMax),sps=sh.slice(0,S.shrubMax);
       if(!pts.length&&!sps.length){clear();tInfo('林の3Dの木：近くに林がありません');return}
       const hs=await Promise.all(pts.map(o=>sampleGround(o.lo,o.la))),hss=await Promise.all(sps.map(o=>sampleGround(o.lo,o.la)));
-      const groups=SHADES.map(()=>({p:[],n:[],i:[]})),sgroups=SHRUB_SHADES.map(()=>({p:[],n:[],i:[]})),tr={p:[],n:[],i:[]},[hMin,hMax]=S.treeHeight,[wMin,wMax]=S.treeWidth,[sMin,sMax]=S.shrubHeight;
+      const groups=SHADES.map(()=>({p:[],n:[],i:[]})),sgroups=SHRUB_SHADES.map(()=>({p:[],n:[],i:[]})),tr={p:[],n:[],i:[]},[hMin,hMax]=st.th,[wMin,wMax]=S.treeWidth,[sMin,sMax]=st.sh,[swMin,swMax]=S.shrubWidth;
       const put=(G,T,O,e,n_,u,sc,ca,sa,rad)=>{const b=G.p.length/3;for(let v=0;v<T.p.length/3;v++){const lx=T.p[v*3],ly=T.p[v*3+1],lz=T.p[v*3+2],rx=(lx*ca-ly*sa)*rad,ry=(lx*sa+ly*ca)*rad,rz=lz*sc,
           nx_=T.n[v*3]*ca-T.n[v*3+1]*sa,ny_=T.n[v*3]*sa+T.n[v*3+1]*ca,nz_=T.n[v*3+2];
           G.p.push(O.x+e.x*rx+n_.x*ry+u.x*rz,O.y+e.y*rx+n_.y*ry+u.y*rz,O.z+e.z*rx+n_.z*ry+u.z*rz);G.n.push(e.x*nx_+n_.x*ny_+u.x*nz_,e.y*nx_+n_.y*ny_+u.y*nz_,e.z*nx_+n_.z*ny_+u.z*nz_)}
         for(const q of T.i)G.i.push(b+q)};
       const frame=(lo,la,h)=>{const L=lo*Math.PI/180,P=la*Math.PI/180;return {O:Cesium.Cartesian3.fromDegrees(lo,la,h),e:{x:-Math.sin(L),y:Math.cos(L),z:0},n_:{x:-Math.sin(P)*Math.cos(L),y:-Math.sin(P)*Math.sin(L),z:Math.cos(P)},u:{x:Math.cos(P)*Math.cos(L),y:Math.cos(P)*Math.sin(L),z:Math.sin(P)}}};
-      sps.forEach((o,k)=>{const {i,j,lo,la}=o,sc=sMin+(sMax-sMin)*hash(i,j,13),rad=sc*(0.5+0.2*hash(i,j,14))/0.6,ang=hash(i,j,15)*2*Math.PI,F=frame(lo,la,hss[k]-0.1);  // 灌木：高さ1〜3mの小さな針葉樹（高木と同じ尖った形。幹は省いて軽く）
+      sps.forEach((o,k)=>{const {i,j,lo,la}=o,sc=sMin+(sMax-sMin)*hash(i,j,13),rad=sc*(swMin+(swMax-swMin)*hash(i,j,14))/0.6,ang=hash(i,j,15)*2*Math.PI,F=frame(lo,la,hss[k]-0.1);  // 灌木：高さ1〜3mの小さな針葉樹（高木と同じ尖った形。幹は省いて軽く）
         put(sgroups[Math.floor(hash(i,j,16)*SHRUB_SHADES.length)%SHRUB_SHADES.length],tpl,F.O,F.e,F.n_,F.u,sc,Math.cos(ang),Math.sin(ang),rad)});
       pts.forEach((o,k)=>{const {i,j,lo,la}=o,h=hs[k],sc=hMin+(hMax-hMin)*hash(i,j,3),rad=sc*(wMin+(wMax-wMin)*hash(i,j,4))/0.6,ang=hash(i,j,5)*2*Math.PI,ca=Math.cos(ang),sa=Math.sin(ang);  // 大きさ・太さ・向き・色の濃さを木ごとに変える
         const L=lo*Math.PI/180,P=la*Math.PI/180,O=Cesium.Cartesian3.fromDegrees(lo,la,h-0.5),e={x:-Math.sin(L),y:Math.cos(L),z:0},n_={x:-Math.sin(P)*Math.cos(L),y:-Math.sin(P)*Math.sin(L),z:Math.cos(P)},u={x:Math.cos(P)*Math.cos(L),y:Math.cos(P)*Math.sin(L),z:Math.sin(P)};
