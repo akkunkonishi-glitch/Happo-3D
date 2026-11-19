@@ -140,7 +140,7 @@ const SETTINGS={
   snowShadeMin:0.6,  // 一番暗い日陰の斜面の明るさ(0〜1)
   snowShadeStrength:1.3,// 斜面の向きによる明暗の強さ（0で陰影なし）
   treeDensity:4,     // 新しく描いた林の木の密度の初期値(1〜10)。木の間隔(m)＝24÷密度。林ごとに編集モードで変更できる
-  treeDistance:400,  // 3Dの木を立てるカメラからの距離(m)の初期値。これより遠くは林の範囲を白っぽく塗るだけ
+  treeDistance:400,  // 3Dの木を立てるカメラからの距離(m)の初期値。これより遠くの林は表示しない
   treeHeight:[8,12], // 高木の高さの範囲(m)の初期値。パネルのスライダーで微調整できる
   treeWidth:[0.4,0.55],// 高木の太さ（高さに対する一番下の枝の広がり＝直径の倍率）。前より細め
   treeMax:6000,      // 一度に立てる高木の上限（多すぎるときはカメラに近い順）
@@ -630,12 +630,10 @@ const isForest=ft=>!!ft&&!!ft.properties&&ft.properties.kind==='forest'&&!!ft.ge
 const isPoly=ft=>isCourse(ft)||isForest(ft);  // 編集できる多角形（コース・林）
 const coursesOnly=g=>Object.assign({},g,{features:(g.features||[]).filter(f=>!isForest(f))});  // コースの保存・書き出しには林を含めない
 const courseRing=ft=>ft.geometry.coordinates[0];
-const FOREST_FILL=Cesium.Color.fromCssColorString('#eef4f1').withAlpha(0.6),FOREST_EDGE=Cesium.Color.fromCssColorString('#2f5d3c').withAlpha(0.9);
 function addCourseFeature(ft){
   const out=[],add=o=>{out.push(courseSrc.entities.add(o))},deg=c=>Cesium.Cartesian3.fromDegreesArray(c.flat());
-  if(isForest(ft)){const sel=ft===editSel,rings=ft.geometry.coordinates;  // 林：遠くからは範囲を白っぽく塗るだけ（近くは3Dの木）
-    add({polygon:{hierarchy:new Cesium.PolygonHierarchy(deg(rings[0]),rings.slice(1).map(h=>new Cesium.PolygonHierarchy(deg(h)))),material:sel?Cesium.Color.fromCssColorString('#ff9800').withAlpha(0.45):FOREST_FILL,classificationType:Cesium.ClassificationType.TERRAIN}});
-    for(const r of rings)add({polyline:{positions:deg(r),width:sel?3.5:2,material:sel?Cesium.Color.fromCssColorString('#ff6d00'):FOREST_EDGE,clampToGround:true}})}
+  if(isForest(ft)){const rings=ft.geometry.coordinates;  // 林：地面の塗りと枠線は描かず木だけを見せる。編集モードで選んだときだけ細い枠線（頂点は編集の目印で表示）
+    if(EDIT&&ft===editSel)for(const r of rings)add({polyline:{positions:deg(r),width:1.5,material:Cesium.Color.fromCssColorString('#ff6d00'),clampToGround:true}})}
   else if(isCourse(ft)){const sel=ft===editSel,rings=ft.geometry.coordinates,m=matsFor(ft.properties.color);
     if(sel||!snowState.on)add({polygon:{hierarchy:new Cesium.PolygonHierarchy(deg(rings[0]),rings.slice(1).map(h=>new Cesium.PolygonHierarchy(deg(h)))),material:sel?Cesium.Color.fromCssColorString('#ff9800').withAlpha(0.5):m.fill,classificationType:Cesium.ClassificationType.TERRAIN}});
     for(const r of rings)add({polyline:{positions:deg(r),width:sel?3.5:2,material:sel?Cesium.Color.fromCssColorString('#ff6d00'):m.edge,clampToGround:true}})}
@@ -810,9 +808,9 @@ document.getElementById('courseOn').onchange=e=>{courseSrc.show=e.target.checked
   on.onchange=()=>{snowState.on=on.checked;keep();drawCourses();snowLayer.update()};  // オフにすると以前の色付きの塗りに戻る
   al.oninput=()=>{snowState.alpha=+al.value;keep();snowLayer.update()}}
 document.getElementById('courseAlpha').oninput=e=>{courseAlpha=+e.target.value;for(const m of courseMats.values()){const c=m.base;m.fill.color=c.withAlpha(courseAlpha);m.edge.color=new Cesium.Color(c.red*0.45,c.green*0.55,c.blue*0.6,Math.min(1,courseAlpha*1.6+0.2))}scene.requestRender()};
-// ミニマップにもコース（各色）・リフト(白)を表示（選択中はオレンジ）
+// ミニマップにもコース（各色）・リフト(白)を表示（選択中はオレンジ）。林は編集モードのときだけ
 mini.hooks.draw=(ctx,proj)=>{if(!courseSrc.show)return;
-  for(const ft of courseGeo.features){const lift=ft.properties.kind==='lift';if(!lift&&!isPoly(ft))continue;const c=lift?ft.geometry.coordinates:courseRing(ft);
+  for(const ft of courseGeo.features){const lift=ft.properties.kind==='lift';if(!lift&&!isPoly(ft))continue;if(isForest(ft)&&!EDIT)continue;const c=lift?ft.geometry.coordinates:courseRing(ft);
     ctx.beginPath();c.forEach((q,i)=>{const [x,y]=proj(q[0],q[1]);i?ctx.lineTo(x,y):ctx.moveTo(x,y)});
     if(lift){ctx.strokeStyle='#fff';ctx.lineWidth=2;ctx.stroke();continue}
     const sel=ft===editSel,col=Cesium.Color.fromCssColorString(isForest(ft)?'#5f8f6c':(ft.properties.color||COURSE.fill));
@@ -1440,7 +1438,7 @@ if(EDIT){obj3dLog.add('編集モード：リフトをタップで選択。起点
 (async()=>{await loadObj3d('lifts');await loadObj3d('buildings')})();
 // ===== 林（編集モードで手で描いたポリゴン）と雪をかぶった針葉樹の3Dモデル =====
 // 林のポリゴンはコースと同じ道具で編集し（kind=forest）、localStorage(happoForestsEdit)に自動保存。「林を書き出す」で forests.geojson。cesium/data/ に置くと次回それを読む。
-// 遠くからは林の範囲を白っぽく塗るだけ。カメラの近く（既定400m）だけ、林の中に木の3Dモデルを並べる。
+// 林の範囲そのもの（塗り・枠線）は描かず、木だけを見せる。木はカメラの近く（既定400m）だけ並べる。編集モードで選んだ林だけ細い枠線と頂点を出す。
 // 1本の木の形を大きさ・向き・色の濃さ（4段階）だけ変えて使い回し、色の濃さごとに1つの形状へまとめて1つのPrimitiveで描く。
 const forests=(()=>{
   const S=SETTINGS,KEY='happoForestsEdit',FILE='data/forests.geojson';
